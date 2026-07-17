@@ -7,6 +7,9 @@ coverage/
 .env
 .env.local
 
+# Per-user local harness settings, not shared config
+.claude/settings.local.json
+
 # Alert history is runtime state, not source. Keep the example only.
 data/alert-history.json
 
