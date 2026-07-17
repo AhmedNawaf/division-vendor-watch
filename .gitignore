@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Local runtime state
+.env
+.env.local
+
+# Alert history is runtime state, not source. Keep the example only.
+data/alert-history.json
+
+# Live fixtures captured during inspection (regenerate with `npm run inspect`)
+testdata/_live-*.html
+testdata/_live-*.json

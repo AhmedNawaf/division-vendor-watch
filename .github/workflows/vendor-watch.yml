@@ -1,0 +1,67 @@
+name: Vendor Watch
+
+on:
+  # Manual runs, with an optional dry-run that parses and prints without sending.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse and print matches without sending to Discord or updating history"
+        type: boolean
+        default: false
+  # The Division 2 vendor reset lands on Tuesdays. Run a little after it to pick up the new stock.
+  schedule:
+    - cron: "0 16 * * 2" # Tuesdays 16:00 UTC
+
+# Allow the run to commit the updated alert-history file back to the repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: vendor-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Run vendor watch
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: npm start
+
+      - name: Persist alert history
+        # Only on real (non-dry) runs. The history file is gitignored for local use,
+        # so force-add it here to carry duplicate-prevention state between scheduled runs.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git add -f data/alert-history.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No alert-history changes to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update alert history [skip ci]"
+            git push
+          fi

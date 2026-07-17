@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "itemName": "Fox's Prayer",
+      "label": "Fox's Prayer (named holster)"
+    },
+    {
+      "itemName": "Contractor's Gloves"
+    },
+    {
+      "brand": "Grupo Sombra S.A.",
+      "requiredAttributes": ["Critical Hit Chance", "Critical Hit Damage"]
+    },
+    {
+      "category": "weapon",
+      "namedOnly": true,
+      "label": "Any named (exotic/named) weapon"
+    },
+    {
+      "category": "gear",
+      "requiredAttributes": ["Critical Hit Chance"],
+      "minimumRollPercentage": 5.5
+    }
+  ]
+}
