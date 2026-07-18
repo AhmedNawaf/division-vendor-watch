@@ -16,7 +16,7 @@ import type { PayloadType } from "./vendor-source.js";
  * per item fingerprint, anything we skip is picked up by the next successful primary run.
  */
 
-export const DEFAULT_MIRROR_BASE =
+const DEFAULT_MIRROR_BASE =
   "https://raw.githubusercontent.com/mxswat/mx-division-builds/master/public/vendors";
 
 const MIRROR_COMMITS_API = "https://api.github.com/repos/mxswat/mx-division-builds/commits";

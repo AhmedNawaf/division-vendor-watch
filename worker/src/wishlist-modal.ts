@@ -156,7 +156,7 @@ interface StockSplit {
  * cap — which happens if an unusual week stocks nearly everything, or when we have no cached
  * stock at all. The form stays usable either way; it just loses the stock framing.
  */
-export function splitByStock(all: readonly string[], inStockNames: ReadonlySet<string>): StockSplit {
+function splitByStock(all: readonly string[], inStockNames: ReadonlySet<string>): StockSplit {
   const inStock = all.filter((v) => inStockNames.has(v));
   const rest = all.filter((v) => !inStockNames.has(v));
   if (inStock.length > 0 && inStock.length <= SELECT_LIMIT && rest.length <= SELECT_LIMIT) {
@@ -178,7 +178,7 @@ interface Selections {
   weapons: Set<string>;
 }
 
-export function selectionsFromRules(rules: readonly WatchRule[]): Selections {
+function selectionsFromRules(rules: readonly WatchRule[]): Selections {
   const s: Selections = {
     gearTypes: new Set(),
     gearSets: new Set(),
@@ -455,7 +455,7 @@ export function parseSubmission(scope: ModalScope, values: Map<string, string[]>
 }
 
 /** A rule's identity, so "already watching this" is decidable without duplicating rows. */
-export function ruleKey(rule: WatchRule): string {
+function ruleKey(rule: WatchRule): string {
   return JSON.stringify([
     rule.itemName ?? null,
     rule.brand ?? null,

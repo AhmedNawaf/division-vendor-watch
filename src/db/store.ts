@@ -25,7 +25,7 @@ export async function initSchema(client: Client): Promise<void> {
 }
 
 /** Ensure a users row exists; refresh updated_at if it already does. */
-export async function upsertUser(client: Client, userId: string): Promise<void> {
+async function upsertUser(client: Client, userId: string): Promise<void> {
   await client.execute({
     sql: `INSERT INTO users (id) VALUES (?)
           ON CONFLICT(id) DO UPDATE SET updated_at = datetime('now')`,

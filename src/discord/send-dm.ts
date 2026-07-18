@@ -226,7 +226,7 @@ async function discordPost(
 }
 
 /** Open (or reuse) the DM channel for a user, returning its channel id. */
-export async function openDmChannel(userId: string, options: SendDmOptions): Promise<string> {
+async function openDmChannel(userId: string, options: SendDmOptions): Promise<string> {
   const channel = (await discordPost(DM_CHANNELS_PATH, { recipient_id: userId }, options)) as {
     id?: string;
   };

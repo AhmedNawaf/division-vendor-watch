@@ -138,7 +138,7 @@ export function resolveGearSet(name: string): string | undefined {
  * the named part. Without reconciling that, watching a named weapon by name would silently never
  * fire — the same failure mode as the brand suffixes, and just as invisible.
  */
-export function namedPrefix(name: string): string {
+function namedPrefix(name: string): string {
   return name.split(/\s+[-–—]\s+/)[0]!.trim();
 }
 
