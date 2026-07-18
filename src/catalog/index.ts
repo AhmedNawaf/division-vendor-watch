@@ -51,12 +51,26 @@ export function paginate(values: readonly string[], size: number = SELECT_LIMIT)
   return pages;
 }
 
+/**
+ * Split into the fewest pages that fit, then spread evenly across them. Plain chunking would
+ * put 27 gear sets into pages of 25 and 2, which reads as a bug; this gives 14 and 13.
+ */
+export function balancedPages(
+  values: readonly string[],
+  max: number = SELECT_LIMIT,
+): CatalogPage<string>[] {
+  if (values.length === 0) return [];
+  const pageCount = Math.ceil(values.length / max);
+  const perPage = Math.ceil(values.length / pageCount);
+  return paginate(values, perPage);
+}
+
 export function brandPages(): CatalogPage<string>[] {
-  return paginate(BRANDS);
+  return balancedPages(BRANDS);
 }
 
 export function gearSetPages(): CatalogPage<string>[] {
-  return paginate(GEAR_SETS);
+  return balancedPages(GEAR_SETS);
 }
 
 /** Every weapon type present in the catalog, in display order. */

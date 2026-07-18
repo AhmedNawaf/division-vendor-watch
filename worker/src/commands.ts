@@ -15,18 +15,18 @@ export const COMMANDS = [
     contexts: [0, 1, 2],
     options: [
       {
-        name: "list",
-        description: "Show your current watch rules",
+        name: "show",
+        description: "Show your wishlist and edit it",
         type: ApplicationCommandOptionType.SUB_COMMAND,
       },
       {
-        name: "add",
-        description: "Add a watch rule by picking from a menu",
+        name: "gear",
+        description: "Pick gear categories, gear sets and brands to watch",
         type: ApplicationCommandOptionType.SUB_COMMAND,
       },
       {
-        name: "remove",
-        description: "Remove one of your watch rules",
+        name: "weapons",
+        description: "Pick weapons to watch",
         type: ApplicationCommandOptionType.SUB_COMMAND,
       },
     ],

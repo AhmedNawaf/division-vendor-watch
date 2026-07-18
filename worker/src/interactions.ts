@@ -1,6 +1,9 @@
 import type { Client } from "@libsql/client";
-import { addRule, listRules, removeRule, type StoredRule } from "../../src/db/store.js";
+import { listRules, replaceRules, type StoredRule } from "../../src/db/store.js";
+import type { WatchRule } from "../../src/config/watchlist-schema.js";
 import {
+  ButtonStyle,
+  collectModalValues,
   ComponentType,
   type Interaction,
   type InteractionResponse,
@@ -10,10 +13,19 @@ import {
   MessageFlags,
   type MessageComponent,
 } from "./discord.js";
-import { presetByKey, RULE_PRESETS } from "./presets.js";
+import {
+  buildGearModal,
+  buildWeaponsModal,
+  diffRules,
+  GEAR_MODAL_ID,
+  parseSubmission,
+  ruleScope,
+  WEAPONS_MODAL_ID,
+  type ModalScope,
+} from "./wishlist-modal.js";
 
-const ADD_SELECT_ID = "wishlist:add";
-const REMOVE_SELECT_ID = "wishlist:remove";
+const BUTTON_EDIT_GEAR = "wishlist:edit:gear";
+const BUTTON_EDIT_WEAPONS = "wishlist:edit:weapons";
 
 /**
  * Route a verified interaction to the right handler. `getClient` is called only when a handler
@@ -31,6 +43,8 @@ export async function handleInteraction(
       return handleCommand(interaction, getClient());
     case InteractionType.MESSAGE_COMPONENT:
       return handleComponent(interaction, getClient());
+    case InteractionType.MODAL_SUBMIT:
+      return handleModalSubmit(interaction, getClient());
     default:
       return ephemeral("Unsupported interaction.");
   }
@@ -46,12 +60,13 @@ async function handleCommand(
 
   const sub = interaction.data.options?.[0]?.name;
   switch (sub) {
-    case "list":
-      return renderList(await listRules(client, userId));
-    case "add":
-      return renderAddMenu();
-    case "remove":
-      return renderRemoveMenu(await listRules(client, userId));
+    case "gear":
+      return buildGearModal(await bareRules(client, userId));
+    case "weapons":
+      return buildWeaponsModal(await bareRules(client, userId));
+    case undefined:
+    case "show":
+      return renderOverview(await listRules(client, userId));
     default:
       return ephemeral("Unknown subcommand.");
   }
@@ -64,29 +79,90 @@ async function handleComponent(
   const userId = interactionUserId(interaction);
   if (!userId) return ephemeral("Could not identify your account.");
 
-  const customId = interaction.data?.custom_id;
-  const values = interaction.data?.values ?? [];
-
-  if (customId === ADD_SELECT_ID) {
-    const preset = values[0] ? presetByKey(values[0]) : undefined;
-    if (!preset) return updateEphemeral("That option is no longer available.");
-    await addRule(client, userId, preset.rule);
-    const rules = await listRules(client, userId);
-    return updateList(`Added **${preset.label}** to your wishlist.`, rules);
+  switch (interaction.data?.custom_id) {
+    case BUTTON_EDIT_GEAR:
+      return buildGearModal(await bareRules(client, userId));
+    case BUTTON_EDIT_WEAPONS:
+      return buildWeaponsModal(await bareRules(client, userId));
+    default:
+      return updateEphemeral("That action is no longer available.");
   }
-
-  if (customId === REMOVE_SELECT_ID) {
-    const ruleId = Number(values[0]);
-    const removed = Number.isFinite(ruleId) && (await removeRule(client, userId, ruleId));
-    const rules = await listRules(client, userId);
-    const note = removed ? "Removed that rule." : "That rule was already gone.";
-    return updateList(note, rules);
-  }
-
-  return updateEphemeral("Unknown action.");
 }
 
-function describeRule(rule: StoredRule): string {
+/**
+ * Apply a submitted form. Each modal owns a scope and replaces it wholesale, so what the form
+ * showed is exactly what ends up stored — no merge semantics to reason about, and editing gear
+ * can never disturb weapon picks.
+ */
+async function handleModalSubmit(
+  interaction: Interaction,
+  client: Client,
+): Promise<InteractionResponse> {
+  const userId = interactionUserId(interaction);
+  if (!userId) return ephemeral("Could not identify your account.");
+
+  const scope: ModalScope | undefined =
+    interaction.data?.custom_id === GEAR_MODAL_ID
+      ? "gear"
+      : interaction.data?.custom_id === WEAPONS_MODAL_ID
+        ? "weapons"
+        : undefined;
+  if (!scope) return ephemeral("That form is no longer available.");
+
+  const submitted = collectModalValues(interaction.data?.components);
+  const { rules: desired, rejected } = parseSubmission(scope, submitted);
+
+  const existing = await listRules(client, userId);
+  const inScope = existing.filter((rule) => ruleScope(stripId(rule)) === scope);
+  const { added, removed } = diffRules(inScope.map(stripId), desired);
+
+  if (added.length > 0 || removed.length > 0) {
+    await replaceRules(
+      client,
+      userId,
+      inScope.map((rule) => rule.id),
+      desired,
+    );
+  }
+
+  const after = await listRules(client, userId);
+  return ephemeral(summarize(scope, added, removed, rejected, after));
+}
+
+function summarize(
+  scope: ModalScope,
+  added: WatchRule[],
+  removed: WatchRule[],
+  rejected: string[],
+  all: StoredRule[],
+): string {
+  const lines: string[] = [];
+  if (added.length === 0 && removed.length === 0) {
+    lines.push(`No changes to your ${scope} watches.`);
+  } else {
+    const parts: string[] = [];
+    if (added.length > 0) parts.push(`added ${added.length}`);
+    if (removed.length > 0) parts.push(`removed ${removed.length}`);
+    lines.push(`✅ Saved — ${parts.join(", ")}.`);
+  }
+  if (rejected.length > 0) {
+    lines.push(`⚠️ Ignored ${rejected.length} unrecognised value(s): ${rejected.slice(0, 5).join(", ")}`);
+  }
+  lines.push("", rulesText(all));
+  return lines.join("\n");
+}
+
+/** Rules without their database ids, which is what the matcher and form builders work with. */
+async function bareRules(client: Client, userId: string): Promise<WatchRule[]> {
+  return (await listRules(client, userId)).map(stripId);
+}
+
+function stripId(rule: StoredRule): WatchRule {
+  const { id: _id, ...bare } = rule;
+  return bare as WatchRule;
+}
+
+function describeRule(rule: WatchRule): string {
   if (rule.label) return rule.label;
   const parts: string[] = [];
   if (rule.namedOnly) parts.push("named");
@@ -100,43 +176,59 @@ function describeRule(rule: StoredRule): string {
 
 function rulesText(rules: StoredRule[]): string {
   if (rules.length === 0) {
-    return "Your wishlist is empty. Use `/wishlist add` to start watching items.";
+    return [
+      "**Your wishlist is empty.**",
+      "",
+      "Pick what you want to watch with the buttons below. After each Tuesday vendor reset,",
+      "you'll get a DM listing anything in stock that matches.",
+    ].join("\n");
   }
-  const lines = rules.map((rule) => `• ${describeRule(rule)}`);
-  return `**Your watch rules (${rules.length}):**\n${lines.join("\n")}`;
+
+  const gear = rules.filter((r) => ruleScope(stripId(r)) === "gear");
+  const weapons = rules.filter((r) => ruleScope(stripId(r)) === "weapons");
+  const lines = [`**Your wishlist (${rules.length})**`];
+
+  for (const [heading, group] of [
+    ["🎽 Gear, sets & brands", gear],
+    ["🔫 Weapons", weapons],
+  ] as const) {
+    if (group.length === 0) continue;
+    lines.push("", heading);
+    // Keep well inside Discord's 2000-character message limit.
+    for (const rule of group.slice(0, 20)) lines.push(`• ${describeRule(stripId(rule))}`);
+    if (group.length > 20) lines.push(`…and ${group.length - 20} more`);
+  }
+  return lines.join("\n");
 }
 
-function renderList(rules: StoredRule[]): InteractionResponse {
-  return ephemeral(rulesText(rules));
-}
-
-function renderAddMenu(): InteractionResponse {
+function renderOverview(rules: StoredRule[]): InteractionResponse {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
       flags: MessageFlags.EPHEMERAL,
-      content: "Pick a rule to add to your wishlist:",
-      components: [selectRow(ADD_SELECT_ID, "Choose an item type…", presetOptions())],
+      content: rulesText(rules),
+      components: [editButtons()],
     },
   };
 }
 
-function renderRemoveMenu(rules: StoredRule[]): InteractionResponse {
-  if (rules.length === 0) return ephemeral("You have no rules to remove.");
+function editButtons(): MessageComponent {
   return {
-    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: {
-      flags: MessageFlags.EPHEMERAL,
-      content: "Pick a rule to remove:",
-      components: [selectRow(REMOVE_SELECT_ID, "Choose a rule to remove…", removeOptions(rules))],
-    },
-  };
-}
-
-function updateList(note: string, rules: StoredRule[]): InteractionResponse {
-  return {
-    type: InteractionResponseType.UPDATE_MESSAGE,
-    data: { flags: MessageFlags.EPHEMERAL, content: `${note}\n\n${rulesText(rules)}`, components: [] },
+    type: ComponentType.ACTION_ROW,
+    components: [
+      {
+        type: ComponentType.BUTTON,
+        style: ButtonStyle.PRIMARY,
+        custom_id: BUTTON_EDIT_GEAR,
+        label: "Edit gear, sets & brands",
+      },
+      {
+        type: ComponentType.BUTTON,
+        style: ButtonStyle.PRIMARY,
+        custom_id: BUTTON_EDIT_WEAPONS,
+        label: "Edit weapons",
+      },
+    ],
   };
 }
 
@@ -151,45 +243,5 @@ function updateEphemeral(content: string): InteractionResponse {
   return {
     type: InteractionResponseType.UPDATE_MESSAGE,
     data: { flags: MessageFlags.EPHEMERAL, content, components: [] },
-  };
-}
-
-interface SelectOption {
-  label: string;
-  value: string;
-  description?: string;
-}
-
-function presetOptions(): SelectOption[] {
-  return RULE_PRESETS.map((preset) => ({
-    label: preset.label,
-    value: preset.key,
-    description: preset.description,
-  }));
-}
-
-function removeOptions(rules: StoredRule[]): SelectOption[] {
-  // Discord caps a string select at 25 options.
-  return rules.slice(0, 25).map((rule) => ({
-    label: describeRule(rule).slice(0, 100),
-    value: String(rule.id),
-  }));
-}
-
-function selectRow(
-  customId: string,
-  placeholder: string,
-  options: SelectOption[],
-): MessageComponent {
-  return {
-    type: ComponentType.ACTION_ROW,
-    components: [
-      {
-        type: ComponentType.STRING_SELECT,
-        custom_id: customId,
-        placeholder,
-        options,
-      },
-    ],
   };
 }

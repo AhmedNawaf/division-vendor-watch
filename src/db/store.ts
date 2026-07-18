@@ -74,6 +74,51 @@ export async function removeRule(client: Client, userId: string, ruleId: number)
   return result.rowsAffected > 0;
 }
 
+/**
+ * Apply a wishlist edit in one batch: drop the listed rule ids and insert the given rules.
+ *
+ * The modal forms replace a whole scope at once (all gear rules, or all weapon rules), so this
+ * has to be atomic — a partial apply would leave the form showing something different from what
+ * is stored, and the next submit would compound the drift. Deletes are owner-scoped so one user
+ * can never remove another's rules.
+ */
+export async function replaceRules(
+  client: Client,
+  userId: string,
+  removeIds: readonly number[],
+  add: readonly WatchRule[],
+): Promise<void> {
+  if (removeIds.length === 0 && add.length === 0) return;
+  await upsertUser(client, userId);
+
+  const statements = [
+    ...removeIds.map((id) => ({
+      sql: `DELETE FROM rules WHERE id = ? AND user_id = ?`,
+      args: [id, userId] as (number | string)[],
+    })),
+    ...add.map((rule) => ({
+      sql: `INSERT INTO rules
+              (user_id, item_name, brand, gear_set, category, required_attributes,
+               talent, named_only, minimum_roll_percentage, label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        userId,
+        rule.itemName ?? null,
+        rule.brand ?? null,
+        rule.gearSet ?? null,
+        rule.category ?? null,
+        rule.requiredAttributes ? JSON.stringify(rule.requiredAttributes) : null,
+        rule.talent ?? null,
+        rule.namedOnly == null ? null : rule.namedOnly ? 1 : 0,
+        rule.minimumRollPercentage ?? null,
+        rule.label ?? null,
+      ] as (string | number | null)[],
+    })),
+  ];
+
+  await client.batch(statements, "write");
+}
+
 /** Assemble a user's rules into a Watchlist for the matcher, or null if they have none. */
 export async function getWatchlist(client: Client, userId: string): Promise<Watchlist | null> {
   const rules = await listRules(client, userId);
