@@ -5,6 +5,7 @@ import {
   WEAPONS,
   balancedPages,
   resolveBrand,
+  resolveGearItem,
   resolveGearSet,
   resolveWeapon,
   SELECT_LIMIT,
@@ -40,12 +41,13 @@ const FIELD_GEAR_TYPES = "geartype";
 const FIELD_GEAR_SET = "gearset";
 const FIELD_BRAND = "brand";
 const FIELD_WEAPON_TYPES = "weapontype";
-const FIELD_EXOTIC = "exotic";
+const FIELD_WEAPON = "weapon";
 
 export type ModalScope = "gear" | "weapons";
 
 /** Gear-side categories only — weapons are the other form's business. */
 const GEAR_TYPE_CHOICES = [
+  { value: "named-gear", label: "Any named gear", description: "Named-tier armor pieces" },
   { value: "gear", label: "All gear", description: "Every armor piece" },
   { value: "gear-mod", label: "All gear mods", description: "Every gear mod" },
   { value: "skill-mod", label: "All skill mods", description: "Every skill mod" },
@@ -54,25 +56,55 @@ const GEAR_TYPE_CHOICES = [
 const WEAPON_TYPE_CHOICES = [
   { value: "weapon", label: "All weapons", description: "Every weapon the vendors carry" },
   { value: "named-weapons", label: "Any named weapon", description: "Only named-tier weapons" },
-  { value: "exotic-weapons", label: "Any exotic weapon", description: "Every exotic, by name" },
 ] as const;
 
-function exoticNames(): string[] {
-  return [...new Set(WEAPONS.filter((w) => w.quality === "Exotic").map((w) => w.name))].sort((a, b) =>
+/**
+ * Named weapons — the only individually watchable weapons that vendors actually stock.
+ *
+ * Exotics are deliberately absent. The vendor feed publishes only header-named, header-he and
+ * header-gs, so no exotic ever appears at a vendor; offering them produced 44 options that could
+ * never fire.
+ */
+function namedWeaponNames(): string[] {
+  return [...new Set(WEAPONS.filter((w) => w.quality === "Named").map((w) => w.name))].sort((a, b) =>
     a.localeCompare(b, "en"),
   );
 }
 
 /**
- * Which form owns a rule. Anything naming an item, restricted to named weapons, or watching the
- * weapon category belongs to the weapons form; gear types, sets and brands belong to the gear
- * form. Each form replaces only its own scope, so editing one never disturbs the other.
+ * Which form owns a rule.
+ *
+ * Keyed on category rather than `namedOnly`, because both forms now offer a "named" toggle:
+ * "Any named weapon" and "Any named gear" differ only by category, and an earlier version that
+ * branched on `namedOnly` would have routed named gear to the weapons form.
  */
 export function ruleScope(rule: WatchRule): ModalScope {
-  if (rule.itemName !== undefined) return "weapons";
-  if (rule.namedOnly === true) return "weapons";
   if (rule.category === "weapon") return "weapons";
-  return "gear";
+  if (rule.itemName !== undefined) {
+    // Item names are weapons today; resolve so named gear lands correctly if that changes.
+    if (resolveWeapon(rule.itemName)) return "weapons";
+    if (resolveGearItem(rule.itemName)) return "gear";
+    return "weapons";
+  }
+  if (rule.category !== undefined) return "gear";
+  // A bare namedOnly rule predates the split; it meant weapons.
+  return rule.namedOnly === true ? "weapons" : "gear";
+}
+
+/**
+ * The option value that would represent a rule in its form.
+ *
+ * A submit may only delete rules whose value the form actually rendered — see
+ * `renderedValues`. Without that, a form showing a subset of a large list (as the weapons form
+ * does) would silently delete every watch it could not display.
+ */
+export function ruleValue(rule: WatchRule): string {
+  if (rule.itemName !== undefined) return rule.itemName;
+  if (rule.gearSet !== undefined) return rule.gearSet;
+  if (rule.brand !== undefined) return rule.brand;
+  if (rule.category === "weapon") return rule.namedOnly === true ? "named-weapons" : "weapon";
+  if (rule.category === "gear" && rule.namedOnly === true) return "named-gear";
+  return rule.category ?? "";
 }
 
 function option(
@@ -143,7 +175,7 @@ interface Selections {
   gearSets: Set<string>;
   brands: Set<string>;
   weaponTypes: Set<string>;
-  exotics: Set<string>;
+  weapons: Set<string>;
 }
 
 export function selectionsFromRules(rules: readonly WatchRule[]): Selections {
@@ -152,15 +184,18 @@ export function selectionsFromRules(rules: readonly WatchRule[]): Selections {
     gearSets: new Set(),
     brands: new Set(),
     weaponTypes: new Set(),
-    exotics: new Set(),
+    weapons: new Set(),
   };
   for (const rule of rules) {
-    if (rule.itemName) s.exotics.add(rule.itemName);
-    else if (rule.namedOnly === true) s.weaponTypes.add("named-weapons");
-    else if (rule.category === "weapon") s.weaponTypes.add("weapon");
-    else if (rule.gearSet) s.gearSets.add(rule.gearSet);
+    // Mirrors ruleValue: whichever option would represent this rule is the one to pre-tick.
+    if (rule.itemName) s.weapons.add(rule.itemName);
+    else if (rule.category === "weapon") {
+      s.weaponTypes.add(rule.namedOnly === true ? "named-weapons" : "weapon");
+    } else if (rule.gearSet) s.gearSets.add(rule.gearSet);
     else if (rule.brand) s.brands.add(rule.brand);
+    else if (rule.category === "gear" && rule.namedOnly === true) s.gearTypes.add("named-gear");
     else if (rule.category) s.gearTypes.add(rule.category);
+    else if (rule.namedOnly === true) s.weaponTypes.add("named-weapons");
   }
   return s;
 }
@@ -238,27 +273,58 @@ export function buildGearModal(
   };
 }
 
+/**
+ * Which named weapons the weapons form lists: everything in stock, plus everything the user is
+ * already watching.
+ *
+ * There are 101 named weapons and only 25 fit a select, so the form cannot show them all. Listing
+ * the user's existing watches is what makes the form safe to submit — otherwise a scope-replace
+ * would delete every watch the form happened not to display.
+ */
+function weaponsToList(watched: ReadonlySet<string>, stock: StockIndex): {
+  inStock: string[];
+  watchedElsewhere: string[];
+} {
+  const named = new Set(namedWeaponNames());
+  const inStock = [...stock.weapons.keys()].filter((n) => named.has(n)).sort((a, b) => a.localeCompare(b, "en"));
+  const inStockSet = new Set(inStock);
+  // Only named weapons are listed: anything else a user somehow watches (an exotic left over
+  // from an older version, say) can never fire, and offering it would imply otherwise.
+  const watchedElsewhere = [...watched]
+    .filter((n) => named.has(n) && !inStockSet.has(n))
+    .sort((a, b) => a.localeCompare(b, "en"));
+  return { inStock: inStock.slice(0, SELECT_LIMIT), watchedElsewhere: watchedElsewhere.slice(0, SELECT_LIMIT) };
+}
+
 export function buildWeaponsModal(
   rules: readonly WatchRule[],
   stock: StockIndex = EMPTY_STOCK,
 ): ModalResponse {
   const s = selectionsFromRules(rules);
-  const exotics = balancedPages(exoticNames());
-
+  const { inStock, watchedElsewhere } = weaponsToList(s.weapons, stock);
   const fields: MessageComponent[] = [];
 
-  exotics.forEach((page, i) => {
+  if (inStock.length > 0) {
     fields.push(
       selectField(
-        `${FIELD_EXOTIC}:${i}`,
-        `Exotic weapons (${i + 1} of ${exotics.length})`,
-        `${page.values[0]} → ${page.values[page.values.length - 1]}`,
-        page.values.map((v) =>
-          option(v, v, s.exotics, stock.itemNames.has(v) ? "in stock now" : undefined),
-        ),
+        `${FIELD_WEAPON}:0`,
+        "🔥 Named weapons in stock now",
+        `At vendors this week (${inStock.length})`,
+        inStock.map((v) => option(v, v, s.weapons, describeStock(stock.weapons.get(v)))),
       ),
     );
-  });
+  }
+
+  if (watchedElsewhere.length > 0) {
+    fields.push(
+      selectField(
+        `${FIELD_WEAPON}:1`,
+        "Named weapons you're watching",
+        "Not in stock this week — deselect to stop watching",
+        watchedElsewhere.map((v) => option(v, v, s.weapons)),
+      ),
+    );
+  }
 
   fields.push(
     selectField(
@@ -266,12 +332,19 @@ export function buildWeaponsModal(
       "Everything in a category",
       "Broad — alerts on every weapon of that kind",
       WEAPON_TYPE_CHOICES.map((c) => {
-        const count = c.value === "weapon" ? stock.categories.get("weapon") : undefined;
+        // stock.weapons counts every resolved weapon, High End included, so the named count
+        // comes from the named-only list rather than that map's size.
+        const count =
+          c.value === "weapon"
+            ? stock.categories.get("weapon")
+            : c.value === "named-weapons"
+              ? inStock.length
+              : undefined;
         return option(
           c.value,
           c.label,
           s.weaponTypes,
-          count ? `${count} weapons this week` : c.description,
+          count ? `${count} this week` : c.description,
         );
       }),
     ),
@@ -285,6 +358,34 @@ export function buildWeaponsModal(
       components: fields.slice(0, 5),
     },
   };
+}
+
+/**
+ * The option values a form currently renders. A submit may only delete rules whose value appears
+ * here; anything the form could not display is left untouched.
+ *
+ * The gear form renders every set, brand and type, so nothing is ever withheld there. The weapons
+ * form can only show a slice of 101 named weapons, which is exactly why this exists.
+ */
+export function renderedValues(
+  scope: ModalScope,
+  rules: readonly WatchRule[],
+  stock: StockIndex = EMPTY_STOCK,
+): Set<string> {
+  if (scope === "gear") {
+    return new Set<string>([
+      ...GEAR_SETS,
+      ...BRANDS,
+      ...GEAR_TYPE_CHOICES.map((c) => c.value),
+    ]);
+  }
+  const s = selectionsFromRules(rules);
+  const { inStock, watchedElsewhere } = weaponsToList(s.weapons, stock);
+  return new Set<string>([
+    ...inStock,
+    ...watchedElsewhere,
+    ...WEAPON_TYPE_CHOICES.map((c) => c.value),
+  ]);
 }
 
 export interface ParsedSubmission {
@@ -315,6 +416,10 @@ export function parseSubmission(scope: ModalScope, values: Map<string, string[]>
     each(FIELD_GEAR_TYPES, (value) => {
       const known = GEAR_TYPE_CHOICES.find((c) => c.value === value);
       if (!known) return rejected.push(value);
+      if (value === "named-gear") {
+        rules.push({ category: "gear", namedOnly: true, label: known.label });
+        return;
+      }
       rules.push({ category: value as WatchRule["category"], label: known.label });
     });
     each(FIELD_GEAR_SET, (value) => {
@@ -333,17 +438,15 @@ export function parseSubmission(scope: ModalScope, values: Map<string, string[]>
         rules.push({ category: "weapon", label: "All weapons" });
       } else if (value === "named-weapons") {
         rules.push({ category: "weapon", namedOnly: true, label: "Any named weapon" });
-      } else if (value === "exotic-weapons") {
-        // Exotics are enumerable, so watch them by name rather than inventing a rarity filter
-        // the matcher does not support.
-        for (const name of exoticNames()) rules.push({ itemName: name, label: name });
       } else {
         rejected.push(value);
       }
     });
-    each(FIELD_EXOTIC, (value) => {
+    each(FIELD_WEAPON, (value) => {
       const weapon = resolveWeapon(value);
-      if (!weapon) return rejected.push(value);
+      // Only named weapons are individually watchable: vendors never stock exotics, and base
+      // High End weapons are too common to be worth a per-item alert.
+      if (!weapon || weapon.quality !== "Named") return rejected.push(value);
       rules.push({ itemName: weapon.name, label: weapon.name });
     });
   }

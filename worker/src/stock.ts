@@ -1,5 +1,5 @@
 import type { VendorItem } from "../../src/types/vendor.js";
-import { resolveBrand, resolveGearSet } from "../../src/catalog/index.js";
+import { resolveBrand, resolveGearSet, resolveWeapon } from "../../src/catalog/index.js";
 
 /**
  * A view of this week's vendor stock, used to make the wishlist forms concrete.
@@ -19,6 +19,9 @@ export interface StockIndex {
   gearSets: Map<string, StockEntry>;
   brands: Map<string, StockEntry>;
   categories: Map<string, number>;
+  /** Weapons in stock, keyed by catalog-canonical name (see the resolution note below). */
+  weapons: Map<string, StockEntry>;
+  /** Raw vendor item names, exactly as published. */
   itemNames: Set<string>;
 }
 
@@ -26,6 +29,7 @@ export const EMPTY_STOCK: StockIndex = {
   gearSets: new Map(),
   brands: new Map(),
   categories: new Map(),
+  weapons: new Map(),
   itemNames: new Set(),
 };
 
@@ -46,6 +50,7 @@ export function indexStock(items: readonly VendorItem[]): StockIndex {
     gearSets: new Map(),
     brands: new Map(),
     categories: new Map(),
+    weapons: new Map(),
     itemNames: new Set(),
   };
 
@@ -60,6 +65,12 @@ export function indexStock(items: readonly VendorItem[]): StockIndex {
     if (item.brand) {
       const canonical = resolveBrand(item.brand);
       if (canonical) bump(index.brands, canonical, item.vendor);
+    }
+    if (item.category === "weapon") {
+      // The feed writes "Pyromaniac - Police M4"; the catalog says "Pyromaniac". Resolving here
+      // is what lets the form mark a named weapon as in stock at all.
+      const canonical = resolveWeapon(item.name);
+      if (canonical) bump(index.weapons, canonical.name, item.vendor);
     }
   }
 

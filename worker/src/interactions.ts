@@ -22,7 +22,9 @@ import {
   diffRules,
   GEAR_MODAL_ID,
   parseSubmission,
+  renderedValues,
   ruleScope,
+  ruleValue,
   WEAPONS_MODAL_ID,
   type ModalScope,
 } from "./wishlist-modal.js";
@@ -140,21 +142,29 @@ async function handleModalSubmit(
   const { rules: desired, rejected } = parseSubmission(scope, submitted);
 
   const existing = await listRules(client, userId);
+  const stock = await loadStock(client);
   const inScope = existing.filter((rule) => ruleScope(stripId(rule)) === scope);
-  const { added, removed } = diffRules(inScope.map(stripId), desired);
+
+  // A form may only remove what it could actually display. The weapons form shows a slice of 101
+  // named weapons, so without this a submit would silently delete every watch it left out.
+  const shown = renderedValues(scope, inScope.map(stripId), stock);
+  const editable = inScope.filter((rule) => shown.has(ruleValue(stripId(rule))));
+  const withheld = inScope.length - editable.length;
+
+  const { added, removed } = diffRules(editable.map(stripId), desired);
 
   if (added.length > 0 || removed.length > 0) {
     await replaceRules(
       client,
       userId,
-      inScope.map((rule) => rule.id),
+      editable.map((rule) => rule.id),
       desired,
     );
   }
 
   const after = await listRules(client, userId);
   const preview = previewMatches(await loadStockItems(client), after.map(stripId));
-  return ephemeral(summarize(scope, added, removed, rejected, after, preview));
+  return ephemeral(summarize(scope, added, removed, rejected, after, preview, withheld));
 }
 
 /**
@@ -175,6 +185,7 @@ function summarize(
   rejected: string[],
   all: StoredRule[],
   preview: string[],
+  withheld: number,
 ): string {
   const lines: string[] = [];
   if (added.length === 0 && removed.length === 0) {
@@ -184,6 +195,10 @@ function summarize(
     if (added.length > 0) parts.push(`added ${added.length}`);
     if (removed.length > 0) parts.push(`removed ${removed.length}`);
     lines.push(`✅ Saved — ${parts.join(", ")}.`);
+  }
+  if (withheld > 0) {
+    // Say so explicitly: silently keeping rules would be as confusing as silently dropping them.
+    lines.push(`(${withheld} watch(es) weren't shown in this form and were left unchanged.)`);
   }
   if (rejected.length > 0) {
     lines.push(`⚠️ Ignored ${rejected.length} unrecognised value(s): ${rejected.slice(0, 5).join(", ")}`);

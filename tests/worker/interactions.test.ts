@@ -12,7 +12,7 @@ import {
   type MessageComponent,
 } from "../../worker/src/discord.js";
 import { GEAR_MODAL_ID, WEAPONS_MODAL_ID } from "../../worker/src/wishlist-modal.js";
-import { BRANDS, GEAR_SETS } from "../../src/catalog/index.js";
+import { BRANDS, GEAR_SETS, WEAPONS, resolveWeapon } from "../../src/catalog/index.js";
 
 const USER = "1234567890";
 
@@ -193,12 +193,35 @@ describe("handleInteraction", () => {
     expect(rules[0]!.category).toBe("gear");
   });
 
-  it("expands the 'any exotic' quick pick into per-weapon rules", async () => {
-    const res = await handleInteraction(submit(WEAPONS_MODAL_ID, { weapontype: ["exotic-weapons"] }), db);
-    expect(res.data?.content).toContain("Saved");
+  it("offers no exotics anywhere — vendors never stock them", async () => {
+    const exotics = new Set(WEAPONS.filter((w) => w.quality === "Exotic").map((w) => w.name));
+    for (const sub of ["gear", "weapons"]) {
+      const res = await handleInteraction(command(sub), db);
+      const values = selects(res.data?.components).flatMap((s) =>
+        ((s.options as Array<{ value: string }>) ?? []).map((o) => o.value),
+      );
+      expect(values.filter((v) => exotics.has(v))).toEqual([]);
+      expect(values).not.toContain("exotic-weapons");
+    }
+  });
+
+  it("refuses an exotic submitted directly, since it could never fire", async () => {
+    const exotic = WEAPONS.find((w) => w.quality === "Exotic")!.name;
+    const res = await handleInteraction(submit(WEAPONS_MODAL_ID, { "weapon:0": [exotic] }), db);
+    expect(res.data?.content).toContain("Ignored 1");
+    expect(await listRules(client, USER)).toHaveLength(0);
+  });
+
+  it("watches named gear, and keeps it in the gear form's scope", async () => {
+    await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["named-gear"] }), db);
     const rules = await listRules(client, USER);
-    expect(rules.length).toBeGreaterThan(20);
-    expect(rules.every((r) => r.itemName)).toBe(true);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.category).toBe("gear");
+    expect(rules[0]!.namedOnly).toBe(true);
+
+    // It must survive a weapons-form submit — namedOnly alone must not route it to weapons.
+    await handleInteraction(submit(WEAPONS_MODAL_ID, {}), db);
+    expect(await listRules(client, USER)).toHaveLength(1);
   });
 
   it("scopes edits to the invoking user", async () => {
@@ -300,8 +323,65 @@ describe("handleInteraction", () => {
       );
       expect(res.data?.content).toContain("Nothing in stock matches right now");
     });
+
+    it("lists the named weapons actually at vendors this week", async () => {
+      const res = await handleInteraction(command("weapons"), db);
+      const labels = (res.data?.components ?? []).map((c) => (c as { label?: string }).label ?? "");
+      expect(labels[0]).toContain("in stock now");
+
+      // Feed names like "Pyromaniac - Police M4" must resolve to the catalog's "Pyromaniac",
+      // or the section would always render empty.
+      const first = selects(res.data?.components)[0]!;
+      const values = (first.options as Array<{ value: string }>).map((o) => o.value);
+      expect(values.length).toBeGreaterThan(0);
+      expect(values.every((v) => WEAPONS.some((w) => w.name === v && w.quality === "Named"))).toBe(true);
+    });
+
+    it("never deletes watches the form ran out of room to display", async () => {
+      // A select holds 25 options. Watch more absent weapons than that, so the form physically
+      // cannot show them all — without the safeguard, submitting would wipe the overflow.
+      const absent = WEAPONS.filter(
+        (w) => w.quality === "Named" && !stockedWeaponNames().has(w.name),
+      ).slice(0, 30);
+      expect(absent.length).toBe(30);
+      for (const w of absent) await addRule(client, USER, { itemName: w.name, label: w.name });
+
+      const res = await handleInteraction(submit(WEAPONS_MODAL_ID, {}), db);
+
+      // The 25 the form could show were cleared; the rest survive and are reported.
+      const remaining = await listRules(client, USER);
+      expect(remaining).toHaveLength(5);
+      expect(res.data?.content).toMatch(/weren't shown in this form/);
+    });
+
+    it("shows watched-but-absent weapons so they can still be removed", async () => {
+      const absent = WEAPONS.find(
+        (w) => w.quality === "Named" && !stockedWeaponNames().has(w.name),
+      )!.name;
+      await addRule(client, USER, { itemName: absent, label: absent });
+
+      const res = await handleInteraction(command("weapons"), db);
+      const labels = (res.data?.components ?? []).map((c) => (c as { label?: string }).label ?? "");
+      expect(labels.some((l) => l.includes("you're watching"))).toBe(true);
+
+      // Deselecting it in that section removes it.
+      await handleInteraction(submit(WEAPONS_MODAL_ID, { "weapon:1": [] }), db);
+      expect(await listRules(client, USER)).toHaveLength(0);
+    });
   });
 });
+
+/** Catalog-canonical weapon names the fixture week stocks. */
+function stockedWeaponNames(): Set<string> {
+  const { items } = parseVendorData(rawFromFixtures());
+  const names = new Set<string>();
+  for (const item of items) {
+    if (item.category !== "weapon") continue;
+    const hit = resolveWeapon(item.name);
+    if (hit) names.add(hit.name);
+  }
+  return names;
+}
 
 /** A gear set the fixture week does not stock, for the empty-preview case. */
 function notInStockGearSet(): string {
