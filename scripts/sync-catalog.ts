@@ -32,7 +32,7 @@ const NOT_A_BRAND = new Set(["Crafted", "Improvised Body Armor"]);
  * Floors that catch an upstream that has broken or started serving an error page. Losing the
  * catalog silently would empty every dropdown in the bot, so refuse to write instead.
  */
-const MINIMUMS = { brands: 30, gearSets: 20, weapons: 250 };
+const MINIMUMS = { brands: 30, gearSets: 20, weapons: 250, gear: 80, talents: 250, attributes: 30 };
 
 /** RFC4180-ish parser. The data contains "Walker, Harris & Co." — naive splitting corrupts it. */
 function parseCsv(text: string): string[][] {
@@ -107,6 +107,109 @@ function quote(value: string): string {
   return JSON.stringify(value);
 }
 
+/** The six armour slots, each published as its own table. */
+const GEAR_SLOTS = ["mask", "chest", "backpack", "gloves", "holster", "kneepads"] as const;
+
+/**
+ * Talent tables encode quality as a single letter. Decoded here so the generated file is
+ * readable and nothing downstream has to know the upstream's shorthand.
+ */
+const TALENT_QUALITY: Record<string, string> = {
+  A: "Standard",
+  N: "Named",
+  E: "Exotic",
+  S: "Gear Set",
+};
+
+interface CatalogGearRow {
+  name: string;
+  slot: string;
+  quality: string;
+}
+
+/**
+ * Named and Exotic gear pieces, by slot.
+ *
+ * High End and Gearset rows are deliberately skipped: for those the "Item Name" column holds the
+ * *brand* or *set* name (a High End chest is literally listed as "5.11 Tactical"), which we
+ * already carry in BRANDS and GEAR_SETS. Only Named and Exotic rows name an actual item.
+ */
+async function fetchGear(): Promise<CatalogGearRow[]> {
+  const out: CatalogGearRow[] = [];
+  const seen = new Set<string>();
+
+  for (const slot of GEAR_SLOTS) {
+    const table = await fetchTable(slot);
+    const iName = column(table, "Item Name");
+    const iQuality = column(table, "Quality");
+    const label = slot.charAt(0).toUpperCase() + slot.slice(1);
+
+    for (const row of table.rows) {
+      const quality = (row[iQuality] ?? "").trim();
+      if (quality !== "Named" && quality !== "Exotic") continue;
+      const name = (row[iName] ?? "").trim();
+      if (!name) continue;
+      const key = `${quality}|${label}|${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ name, slot: label, quality });
+    }
+  }
+
+  out.sort(
+    (a, b) =>
+      a.quality.localeCompare(b.quality, "en") ||
+      a.slot.localeCompare(b.slot, "en") ||
+      a.name.localeCompare(b.name, "en"),
+  );
+  return out;
+}
+
+interface CatalogTalentRow {
+  name: string;
+  kind: "weapon" | "gear";
+  quality: string;
+}
+
+/** Talent names from both talent tables, deduplicated (gear talents repeat across slots). */
+async function fetchTalents(): Promise<CatalogTalentRow[]> {
+  const out: CatalogTalentRow[] = [];
+  const seen = new Set<string>();
+
+  const add = (name: string, kind: "weapon" | "gear", rawQuality: string): void => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const key = `${kind}|${trimmed}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: trimmed, kind, quality: TALENT_QUALITY[rawQuality.trim()] ?? "Standard" });
+  };
+
+  const weaponTable = await fetchTable("weaponTalents");
+  const wtName = column(weaponTable, "Name");
+  const wtQuality = column(weaponTable, "Quality");
+  for (const row of weaponTable.rows) add(row[wtName] ?? "", "weapon", row[wtQuality] ?? "");
+
+  const gearTable = await fetchTable("gearTalents");
+  const gtName = column(gearTable, "Talent");
+  const gtQuality = column(gearTable, "Quality");
+  for (const row of gearTable.rows) add(row[gtName] ?? "", "gear", row[gtQuality] ?? "");
+
+  out.sort((a, b) => a.kind.localeCompare(b.kind, "en") || a.name.localeCompare(b.name, "en"));
+  return out;
+}
+
+/** Distinct attribute (stat) names across gear and weapons, for attribute-based rules. */
+async function fetchAttributes(): Promise<string[]> {
+  const names: string[] = [];
+  for (const table of ["gearAttributes", "weaponAttributes"] as const) {
+    const t = await fetchTable(table);
+    const iStat = column(t, "Stat");
+    for (const row of t.rows) names.push(row[iStat] ?? "");
+  }
+  return unique(names);
+}
+
 async function main(): Promise<void> {
   console.log(`Fetching catalog from ${BASE} …`);
 
@@ -158,6 +261,20 @@ async function main(): Promise<void> {
     throw new Error(`Only ${weapons.length} weapons parsed (expected >= ${MINIMUMS.weapons}); refusing to write.`);
   }
 
+  const gear = await fetchGear();
+  const talents = await fetchTalents();
+  const attributes = await fetchAttributes();
+
+  if (gear.length < MINIMUMS.gear) {
+    throw new Error(`Only ${gear.length} named/exotic gear parsed (expected >= ${MINIMUMS.gear}); refusing to write.`);
+  }
+  if (talents.length < MINIMUMS.talents) {
+    throw new Error(`Only ${talents.length} talents parsed (expected >= ${MINIMUMS.talents}); refusing to write.`);
+  }
+  if (attributes.length < MINIMUMS.attributes) {
+    throw new Error(`Only ${attributes.length} attributes parsed (expected >= ${MINIMUMS.attributes}); refusing to write.`);
+  }
+
   // Report what changed, so the seasonal refresh is reviewable rather than a blind diff.
   let previous: { BRANDS?: readonly string[]; GEAR_SETS?: readonly string[] } | undefined;
   try {
@@ -181,7 +298,7 @@ async function main(): Promise<void> {
   }
 
   const checksum = createHash("sha256")
-    .update(JSON.stringify({ brands, gearSets, weapons }))
+    .update(JSON.stringify({ brands, gearSets, weapons, gear, talents, attributes }))
     .digest("hex")
     .slice(0, 12);
 
@@ -226,20 +343,73 @@ ${weapons
   .map((w) => `  { name: ${quote(w.name)}, type: ${quote(w.type)}, quality: ${quote(w.quality)} },`)
   .join("\n")}
 ];
+
+export type GearSlot = ${[...new Set(gear.map((g) => g.slot))].sort().map(quote).join(" | ")};
+
+export type GearQuality = ${[...new Set(gear.map((g) => g.quality))].sort().map(quote).join(" | ")};
+
+export interface CatalogGear {
+  name: string;
+  slot: GearSlot;
+  quality: GearQuality;
+}
+
+/**
+ * Named and Exotic gear pieces (${gear.length}).
+ *
+ * High End and Gearset rows are excluded on purpose: upstream lists those by brand or set name
+ * rather than item name, and those names already live in BRANDS and GEAR_SETS.
+ */
+export const GEAR: readonly CatalogGear[] = [
+${gear
+  .map((g) => `  { name: ${quote(g.name)}, slot: ${quote(g.slot)}, quality: ${quote(g.quality)} },`)
+  .join("\n")}
+];
+
+export type TalentKind = "weapon" | "gear";
+
+export type TalentQuality = ${[...new Set(talents.map((t) => t.quality))]
+    .sort()
+    .map(quote)
+    .join(" | ")};
+
+export interface CatalogTalent {
+  name: string;
+  kind: TalentKind;
+  quality: TalentQuality;
+}
+
+/** Weapon and gear talents (${talents.length}), deduplicated by kind and name. */
+export const TALENTS: readonly CatalogTalent[] = [
+${talents
+  .map((t) => `  { name: ${quote(t.name)}, kind: ${quote(t.kind)}, quality: ${quote(t.quality)} },`)
+  .join("\n")}
+];
+
+/** Distinct attribute names across gear and weapons (${attributes.length}). */
+export const ATTRIBUTES: readonly string[] = [
+${attributes.map((a) => `  ${quote(a)},`).join("\n")}
+];
 `;
 
   await writeFile(OUT, body, "utf8");
 
-  const byQuality: Record<string, number> = {};
-  for (const w of weapons) byQuality[w.quality] = (byQuality[w.quality] ?? 0) + 1;
+  const tally = <T,>(list: readonly T[], key: (item: T) => string): string => {
+    const counts: Record<string, number> = {};
+    for (const item of list) counts[key(item)] = (counts[key(item)] ?? 0) + 1;
+    return Object.entries(counts)
+      .map(([k, n]) => `${k}: ${n}`)
+      .join(", ");
+  };
 
   console.log(`\nWrote ${OUT}`);
-  console.log(`  checksum  ${checksum}`);
-  console.log(`  brands    ${brands.length}`);
-  console.log(`  gear sets ${gearSets.length}`);
-  console.log(`  weapons   ${weapons.length}  (${Object.entries(byQuality)
-    .map(([q, n]) => `${q}: ${n}`)
-    .join(", ")})`);
+  console.log(`  checksum   ${checksum}`);
+  console.log(`  brands     ${brands.length}`);
+  console.log(`  gear sets  ${gearSets.length}`);
+  console.log(`  weapons    ${weapons.length}  (${tally(weapons, (w) => w.quality)})`);
+  console.log(`  gear       ${gear.length}  (${tally(gear, (g) => g.quality)})`);
+  console.log(`  talents    ${talents.length}  (${tally(talents, (t) => t.kind)})`);
+  console.log(`  attributes ${attributes.length}`);
 }
 
 main().catch((err: unknown) => {

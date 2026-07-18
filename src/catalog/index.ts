@@ -1,15 +1,39 @@
-import { nameMatches } from "../matcher/normalize.js";
+import { nameMatches, normalizeKey } from "../matcher/normalize.js";
 import {
+  ATTRIBUTES,
   BRANDS,
+  GEAR,
   GEAR_SETS,
+  TALENTS,
   WEAPONS,
+  type CatalogGear,
+  type CatalogTalent,
   type CatalogWeapon,
+  type TalentKind,
   type WeaponQuality,
   type WeaponType,
 } from "./catalog-data.js";
 
-export { BRANDS, GEAR_SETS, WEAPONS, CATALOG_CHECKSUM } from "./catalog-data.js";
-export type { CatalogWeapon, WeaponQuality, WeaponType } from "./catalog-data.js";
+export {
+  ATTRIBUTES,
+  BRANDS,
+  GEAR,
+  GEAR_SETS,
+  TALENTS,
+  WEAPONS,
+  CATALOG_CHECKSUM,
+} from "./catalog-data.js";
+export type {
+  CatalogGear,
+  CatalogTalent,
+  CatalogWeapon,
+  GearQuality,
+  GearSlot,
+  TalentKind,
+  TalentQuality,
+  WeaponQuality,
+  WeaponType,
+} from "./catalog-data.js";
 
 /**
  * Helpers for turning the static catalog into Discord menus.
@@ -108,8 +132,54 @@ export function resolveGearSet(name: string): string | undefined {
   return GEAR_SETS.find((g) => nameMatches(g, name));
 }
 
-/** Weapon names are matched exactly (after normalization) — suffixes distinguish real weapons. */
+/**
+ * The vendor feed writes named items as "<Named> - <Base item>", with either a hyphen or an
+ * en-dash ("Pyromaniac - Police M4", "Cuélebre – Military M870"), while the catalog stores only
+ * the named part. Without reconciling that, watching a named weapon by name would silently never
+ * fire — the same failure mode as the brand suffixes, and just as invisible.
+ */
+export function namedPrefix(name: string): string {
+  return name.split(/\s+[-–—]\s+/)[0]!.trim();
+}
+
+/**
+ * Weapon names are matched exactly (after normalization) rather than by prefix — "Police M4" and
+ * "Police M4 Enhanced" are different guns. The named-item separator is handled first, since that
+ * is a formatting difference between sources rather than a different item.
+ */
 export function resolveWeapon(name: string): CatalogWeapon | undefined {
-  const target = name.trim().toLowerCase();
-  return WEAPONS.find((w) => w.name.toLowerCase() === target);
+  const exact = normalizeKey(name);
+  const direct = WEAPONS.find((w) => normalizeKey(w.name) === exact);
+  if (direct) return direct;
+  const prefix = normalizeKey(namedPrefix(name));
+  return WEAPONS.find((w) => normalizeKey(w.name) === prefix);
+}
+
+/** Named or Exotic gear pieces, resolved the same way as weapons. */
+export function resolveGearItem(name: string): CatalogGear | undefined {
+  const exact = normalizeKey(name);
+  const direct = GEAR.find((g) => normalizeKey(g.name) === exact);
+  if (direct) return direct;
+  const prefix = normalizeKey(namedPrefix(name));
+  return GEAR.find((g) => normalizeKey(g.name) === prefix);
+}
+
+export function resolveTalent(name: string, kind?: TalentKind): CatalogTalent | undefined {
+  const target = normalizeKey(name);
+  return TALENTS.find((t) => normalizeKey(t.name) === target && (!kind || t.kind === kind));
+}
+
+export function resolveAttribute(name: string): string | undefined {
+  const target = normalizeKey(name);
+  return ATTRIBUTES.find((a) => normalizeKey(a) === target);
+}
+
+/** Gear pieces vendors can actually stock. Exotics never appear at vendors, so they are excluded. */
+export function vendorSellableGear(): CatalogGear[] {
+  return GEAR.filter((g) => g.quality === "Named");
+}
+
+/** Weapons vendors can actually stock: High End and Named, never Exotic. */
+export function vendorSellableWeapons(): CatalogWeapon[] {
+  return WEAPONS.filter((w) => w.quality !== "Exotic");
 }
