@@ -138,4 +138,33 @@ describe("parseVendorData validation", () => {
       /Required section/,
     );
   });
+
+  it("rejects a full-size payload whose records all lost an expected field", () => {
+    // A realistic-sized payload that no longer carries `talent` on any weapon: without this
+    // check the run would silently degrade into items with no talents and quietly stop matching.
+    const weapons = Array.from({ length: 12 }, (_, i) => ({
+      type: "weapon",
+      vendor: "V",
+      name: `W${i}`,
+      rarity: "header-he",
+      attribute1: "<span class=\"icon-weapons\"></span>10% SMG Damage",
+      attribute2: "-",
+      attribute3: "-",
+    }));
+    expect(() => parseVendorData(rawOf({ weapons }), { requiredSections: ["weapons"] })).toThrow(
+      /Source shape changed: no weapons record contains talent/,
+    );
+  });
+
+  it("tolerates a sparse field in a payload too small to draw conclusions from", () => {
+    const weapons = Array.from({ length: 3 }, (_, i) => ({
+      type: "weapon",
+      vendor: "V",
+      name: `W${i}`,
+      rarity: "header-he",
+    }));
+    expect(() =>
+      parseVendorData(rawOf({ weapons }), { minTotalItems: 1, requiredSections: ["weapons"] }),
+    ).not.toThrow();
+  });
 });

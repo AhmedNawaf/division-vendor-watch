@@ -212,20 +212,53 @@ const NORMALIZERS: Record<PayloadType, (record: Record<string, unknown>) => Vend
   mods: normalizeMod,
 };
 
+/**
+ * Fields we read off each payload. Individual records may legitimately omit an optional field,
+ * but a field absent from *every* record in a payload means the upstream shape changed —
+ * which would otherwise degrade silently into items with no talents, no attributes, and no
+ * matches, i.e. a watcher that quietly stops alerting.
+ */
+const EXPECTED_FIELDS: Record<PayloadType, string[]> = {
+  gear: ["vendor", "name", "rarity", "brand", "core", "attributes", "talents"],
+  weapons: ["vendor", "name", "rarity", "talent", "attribute1", "attribute2", "attribute3"],
+  mods: ["vendor", "name", "rarity", "attributes"],
+};
+
+/**
+ * Absence is only evidence at scale. Real payloads carry 40-55 records, so a field missing from
+ * all of them is a shape change; in a handful of records it is just a sparse week. Below this
+ * threshold we stay quiet and let the item-count check speak instead.
+ */
+const MIN_RECORDS_FOR_SHAPE_CHECK = 10;
+
+function assertPayloadShape(type: PayloadType, records: Record<string, unknown>[]): void {
+  if (records.length < MIN_RECORDS_FOR_SHAPE_CHECK) return;
+  const seen = new Set<string>();
+  for (const record of records) {
+    for (const key of Object.keys(record)) seen.add(key);
+  }
+  const absent = EXPECTED_FIELDS[type].filter((field) => !seen.has(field));
+  if (absent.length > 0) {
+    throw new ParserError(
+      `Source shape changed: no ${type} record contains ${absent.join(", ")}`,
+      { type, absent, present: [...seen].sort(), records: records.length },
+    );
+  }
+}
+
 /** Normalize raw source data into a validated VendorReset. Throws ParserError on bad structure. */
 export function parseVendorData(raw: RawVendorData, options: ParseOptions = {}): VendorReset {
   const config = { ...DEFAULTS, ...options };
   const items: VendorItem[] = [];
   const countsByType: Record<string, number> = {};
 
+  const recordsByType: Array<[PayloadType, Record<string, unknown>[]]> = [];
   for (const payload of raw.payloads) {
     const normalize = NORMALIZERS[payload.type];
-    let count = 0;
-    for (const record of payload.records) {
-      items.push(normalize(asRecord(record)));
-      count += 1;
-    }
-    countsByType[payload.type] = count;
+    const records = payload.records.map(asRecord);
+    recordsByType.push([payload.type, records]);
+    for (const record of records) items.push(normalize(record));
+    countsByType[payload.type] = records.length;
   }
 
   if (items.length === 0) {
@@ -257,6 +290,9 @@ export function parseVendorData(raw: RawVendorData, options: ParseOptions = {}):
       { count: items.length, minTotalItems: config.minTotalItems, countsByType },
     );
   }
+
+  // Last: the payload is big enough to be real, so a field missing everywhere is a shape change.
+  for (const [type, records] of recordsByType) assertPayloadShape(type, records);
 
   return {
     sourceUrl: raw.sourceUrl,

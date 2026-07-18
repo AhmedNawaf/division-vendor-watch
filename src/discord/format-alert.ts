@@ -11,14 +11,33 @@ export interface FormatOptions {
   maxMessageLength?: number;
   /** Include the "Reason:" section explaining why each item matched. Defaults to true. */
   showReasons?: boolean;
+  /** Credit line for the upstream data source. Pass `false` to omit. */
+  sourceCredit?: string | false;
+  /** Warning shown when the stock came from a degraded/incomplete source. */
+  sourceNotice?: string;
 }
 
 const DEFAULT_TITLE = "🛒 **Weekly Vendor Watch**";
 
-function buildHeader(title: string, resetDate: string | undefined, matchCount: number): string {
+/**
+ * The vendor stock is hand-compiled and published for free by Ruben Alamina. There is no
+ * official Ubisoft API and no independent source, so the least we can do is say where it
+ * came from.
+ */
+export const SOURCE_CREDIT = "📖 Data: rubenalamina.mx";
+
+function buildHeader(
+  title: string,
+  resetDate: string | undefined,
+  matchCount: number,
+  credit: string | false,
+  notice: string | undefined,
+): string {
   const lines = [title];
   if (resetDate) lines.push(`📅 Next reset: ${resetDate}`);
   lines.push(`🎯 ${matchCount} ${matchCount === 1 ? "match" : "matches"}`);
+  if (notice) lines.push(`⚠️ ${notice}`);
+  if (credit !== false) lines.push(credit);
   return lines.join("\n");
 }
 
@@ -85,7 +104,13 @@ export function formatAlerts(matches: ItemMatch[], options: FormatOptions = {}):
 
   const limit = options.maxMessageLength ?? DISCORD_MAX_MESSAGE_LENGTH;
   const title = options.header ?? DEFAULT_TITLE;
-  const header = buildHeader(title, options.resetDate, matches.length);
+  const header = buildHeader(
+    title,
+    options.resetDate,
+    matches.length,
+    options.sourceCredit ?? SOURCE_CREDIT,
+    options.sourceNotice,
+  );
   const contHeader = `${title} (continued)`;
 
   const showReasons = options.showReasons ?? true;

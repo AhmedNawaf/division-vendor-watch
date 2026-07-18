@@ -1,0 +1,50 @@
+name: Vendor Fan-out
+
+on:
+  # Manual runs, with an optional dry-run that evaluates per user without sending DMs.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Evaluate every subscriber and print matches without sending DMs or recording history"
+        type: boolean
+        default: false
+  # The Division 2 vendor reset lands on Tuesdays. Run a little after it to pick up the new stock.
+  schedule:
+    - cron: "10 16 * * 2" # Tuesdays 16:10 UTC (after the single-user watch)
+
+concurrency:
+  group: vendor-fanout
+  cancel-in-progress: false
+
+jobs:
+  fanout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Run vendor fan-out
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: npm run fanout

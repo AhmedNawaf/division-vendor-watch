@@ -34,23 +34,44 @@ export interface FakeRoute {
   status?: number;
   contentType?: string;
   body: string;
+  /** Extra response headers, e.g. `last-modified`. */
+  headers?: Record<string, string>;
+  /** Throw instead of responding, to exercise transport-failure paths. */
+  throws?: Error;
+}
+
+/** A route may react to the request (e.g. answer 304 when `if-modified-since` matches). */
+export type FakeRouteResolver = FakeRoute | ((init?: RequestInit) => FakeRoute);
+
+export function requestHeader(init: RequestInit | undefined, name: string): string | undefined {
+  const headers = init?.headers as Record<string, string> | undefined;
+  if (!headers) return undefined;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+  return key ? headers[key] : undefined;
 }
 
 /**
  * Build a fake fetch that matches a request URL against substrings.
  * Honors AbortSignal so timeout paths can be exercised.
  */
-export function makeFakeFetch(
-  routes: Array<{ match: string; route: FakeRoute }>,
-): { fetchImpl: typeof fetch; calls: Array<{ url: string; init?: RequestInit }> } {
+export function makeFakeFetch(routes: Array<{ match: string; route: FakeRouteResolver }>): {
+  fetchImpl: typeof fetch;
+  calls: Array<{ url: string; init?: RequestInit }>;
+} {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     calls.push({ url, init });
     const found = routes.find((r) => url.includes(r.match));
     if (!found) throw new Error(`No fake route for ${url}`);
-    const { status = 200, contentType = "application/json", body } = found.route;
-    return new Response(body, { status, headers: { "content-type": contentType } });
+    const resolved = typeof found.route === "function" ? found.route(init) : found.route;
+    if (resolved.throws) throw resolved.throws;
+    const { status = 200, contentType = "application/json", body, headers = {} } = resolved;
+    // 304 must carry no body, matching what a real server sends.
+    return new Response(status === 304 ? null : body, {
+      status,
+      headers: { "content-type": contentType, ...headers },
+    });
   }) as typeof fetch;
   return { fetchImpl, calls };
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DISCORD_MAX_MESSAGE_LENGTH,
+  SOURCE_CREDIT,
   formatAlerts,
   formatItemBlock,
 } from "../../src/discord/format-alert.js";
@@ -104,5 +105,26 @@ describe("formatAlerts", () => {
     for (const message of messages) {
       expect(message.length).toBeLessThanOrEqual(DISCORD_MAX_MESSAGE_LENGTH);
     }
+  });
+
+  it("credits the upstream data source once, in the first message only", () => {
+    const many = Array.from({ length: 60 }, (_, i) => match({ name: `Item ${i}` }));
+    const messages = formatAlerts(many);
+
+    expect(messages.length).toBeGreaterThan(1);
+    expect(messages[0]).toContain(SOURCE_CREDIT);
+    for (const message of messages.slice(1)) expect(message).not.toContain(SOURCE_CREDIT);
+  });
+
+  it("omits the credit when explicitly disabled", () => {
+    const [message] = formatAlerts([match()], { sourceCredit: false });
+    expect(message).not.toContain(SOURCE_CREDIT);
+  });
+
+  it("surfaces a degraded-source notice in the header", () => {
+    const [message] = formatAlerts([match()], {
+      sourceNotice: "Vendor source unavailable — using this week's cached stock.",
+    });
+    expect(message).toContain("⚠️ Vendor source unavailable");
   });
 });

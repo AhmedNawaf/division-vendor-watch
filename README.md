@@ -21,6 +21,51 @@ the most reliable extraction path — it avoids scraping presentational HTML tha
 often. If the loader script or any of the three sections goes missing, the run fails with
 a clear `VendorSourceError` / `ParserError` rather than silently sending nothing.
 
+### Where the data actually comes from
+
+There is no official Ubisoft API for vendor stock, and the weekly rotation is server-side, so
+it cannot be datamined from game files. Every community tool in this space ultimately reads the
+same three JSON files, which **Ruben Alamina compiles by hand each week** and publishes for
+free — no terms of use, no rate limits, fully open `robots.txt`. We are guests on someone's
+personal server, so the tool is built to be a considerate one:
+
+- **Conditional requests.** Each payload's `Last-Modified` is stored and echoed back as
+  `If-Modified-Since`. An unchanged week costs three `304`s and transfers no bodies.
+- **Attribution.** Alerts carry a `📖 Data: rubenalamina.mx` credit line.
+- **A cache, not a retry storm.** Parsed stock is cached per reset week; a failed fetch serves
+  that cache instead of hammering the source.
+
+> **Note:** the site is updated *several times a week*, not just at reset — Cassie's stock is
+> added on Wednesdays and corrections land later. A Tuesday-only run will miss those. Because
+> conditional requests make a no-op check nearly free, polling daily is the cheaper-than-it-looks
+> option, and per-item fingerprints mean nothing gets alerted twice.
+
+### Resilience and degraded sources
+
+`resolveStock` in [`src/fanout/run-fanout.ts`](src/fanout/run-fanout.ts) degrades in the order
+that keeps alerts *truthful* — the guiding rule being that alerting on stock nobody can buy is
+worse than alerting nothing:
+
+1. Fresh conditional fetch from the primary source.
+2. On `304` — this reset week's cached stock. It is still evaluated, because watchlists change
+   independently of the stock: a rule added yesterday must still match today.
+3. On failure — the same cached copy, flagged degraded (alerts say so in their header).
+4. On failure with no usable cache — the community mirror
+   ([`mxswat/mx-division-builds`](https://github.com/mxswat/mx-division-builds), which syncs
+   from the same upstream), but **only** for files GitHub confirms were committed after this
+   week's reset.
+
+The cache is always scoped to the current reset week; a previous week's stock is never served.
+
+Two deliberate refusals are worth knowing about. A **shape change** (loader script gone,
+non-array JSON) never triggers the mirror — the mirror carries a copy of the same upstream data,
+so it would likely be broken identically and the fallback would only bury the breakage. And the
+mirror's **freshness gate is strict**: at the time of writing its sync runs *before* the Tuesday
+reset and its `mods.json` has not been updated since **February 2021**, so in practice every
+mirror payload is currently rejected. That is the gate working, not failing — it is why stale
+stock never reaches a DM. Treat the mirror as insurance that may pay out later, and the cache
+as the fallback that actually carries the weight.
+
 ### Reset date & time
 
 The page's JSON cache-buster (e.g. `?20260717`) is the site's *last-updated* date, not the
@@ -228,6 +273,36 @@ Discord sends a signed PING that the Worker must answer (it does). Once saved, `
 > Going **public** (listed, installable by strangers) adds obligations: a Privacy Policy and
 > Terms of Service, verification at 100 installs, and DM-rate-limit hygiene. The current slice
 > targets you and friends first; treat public distribution as a later, deliberate step.
+
+### DM delivery safety
+
+The realistic way to lose this bot is not a rate limit — it is **quarantine**. Discord's Create
+DM endpoint carries an explicit warning that opening "a significant amount of DMs too quickly"
+can get a bot *blocked from opening new ones*, and
+[discord-api-docs#5987](https://github.com/discord/discord-api-docs/issues/5987) documents
+legitimate bots being quarantined indefinitely with no published threshold and no appeal path.
+The trigger correlates with **channel opens**, not messages sent. The fan-out is built around
+that fact:
+
+- **DM channel ids are cached forever** (`delivery_state.dm_channel_id`). We open a channel once
+  per user, ever; steady-state runs make zero Create DM calls. Verified against production —
+  a second send to a cached id issues only `/channels/{id}/messages`. If an id ever goes stale
+  (`10003`), we reopen once and re-cache. This is the single biggest risk reduction available.
+- **Everything is paced** through one shared token bucket (`RateLimiter`), default 5 req/s
+  against Discord's 50 req/s ceiling, plus a 1s gap between users. A weekly digest is not
+  second-sensitive, so there is no reason to burst.
+- **A global 429 halts the whole run**, not just the offending route — continuing to send on
+  other routes during a global limit is what escalates a 429 into an IP-level ban.
+- **Permanent refusals stop being retried.** A `50007`, a `403`, or a `400` from Create DM
+  (which is how Discord reports "blocked the bot / DMs closed") raises
+  `DiscordUndeliverableError`; the user is recorded in `delivery_state.undeliverable_reason`
+  and skipped thereafter. Discord bans an IP after 10,000 invalid (401/403/429) requests in
+  10 minutes, so re-earning a 403 every week across a fleet is an availability risk, not just
+  log noise. Transient failures still retry and clear on success.
+
+Keep DM content strictly functional. Discord's Developer Policy permits messages "directly
+related to maintaining or improving an Application's functionality" — adding changelogs,
+promotion, or anything unrelated would move this from compliant to violating.
 
 ## Troubleshooting
 

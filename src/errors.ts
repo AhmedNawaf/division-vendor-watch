@@ -29,9 +29,13 @@ export class ConfigError extends AppError {
   readonly code = "CONFIG_ERROR";
 }
 
-/** Delivering a message to Discord failed. */
+/**
+ * Delivering a message to Discord failed. Annotated as `string` rather than a literal so
+ * subclasses can narrow the reason (see DiscordUndeliverableError) while callers can still
+ * catch every delivery failure with one `instanceof`.
+ */
 export class DiscordDeliveryError extends AppError {
-  readonly code = "DISCORD_DELIVERY_ERROR";
+  readonly code: string = "DISCORD_DELIVERY_ERROR";
 }
 
 /** Reading or writing the alert history failed. */

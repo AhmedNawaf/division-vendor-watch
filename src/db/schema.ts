@@ -44,6 +44,35 @@ CREATE TABLE IF NOT EXISTS vendor_cache (
   items_json  TEXT NOT NULL      -- JSON array of normalized VendorItem
 );
 
+-- Per-user delivery bookkeeping. Separate from users so it can be added to an existing
+-- database without a column migration.
+--
+-- dm_channel_id is the single most important column here: Discord's Create DM endpoint warns
+-- that opening many DMs quickly can get a bot "blocked from opening new ones", and DM channel
+-- ids are stable and reusable. Caching them means we open a channel once per user, ever, and
+-- steady-state runs issue no Create DM calls at all.
+--
+-- undeliverable_reason records a *permanent* refusal (user blocked the bot, DMs closed) so we
+-- stop retrying them every week — both to avoid a pointless 403 every run and to keep the
+-- failure count meaningful.
+CREATE TABLE IF NOT EXISTS delivery_state (
+  user_id              TEXT PRIMARY KEY,
+  dm_channel_id        TEXT,
+  undeliverable_reason TEXT,
+  failure_count        INTEGER NOT NULL DEFAULT 0,
+  last_failure_at      TEXT,
+  updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Small key/value bag for source bookkeeping (e.g. per-payload Last-Modified stamps used
+-- for conditional requests). Kept separate from vendor_cache so it can be added to an
+-- existing database without a column migration.
+CREATE TABLE IF NOT EXISTS source_meta (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Reserved for the later server-channel delivery mode; unused while delivery = 'dm'.
 CREATE TABLE IF NOT EXISTS guild_config (
   guild_id      TEXT PRIMARY KEY,

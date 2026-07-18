@@ -136,18 +136,143 @@ export async function saveVendorCache(
   });
 }
 
+/** Cached vendor stock for one specific reset week, or null if we have none for it. */
+export async function getVendorCache(
+  client: Client,
+  resetWeek: string,
+): Promise<VendorCacheEntry | null> {
+  const result = await client.execute({
+    sql: `SELECT reset_week, fetched_at, items_json FROM vendor_cache WHERE reset_week = ?`,
+    args: [resetWeek],
+  });
+  return rowToCacheEntry(result.rows[0]);
+}
+
 /** Most recent cached vendor stock (for `/preview` and menu option generation). */
 export async function getLatestVendorCache(client: Client): Promise<VendorCacheEntry | null> {
   const result = await client.execute(
     `SELECT reset_week, fetched_at, items_json FROM vendor_cache ORDER BY reset_week DESC LIMIT 1`,
   );
-  const row = result.rows[0];
+  return rowToCacheEntry(result.rows[0]);
+}
+
+function rowToCacheEntry(row: Row | undefined): VendorCacheEntry | null {
   if (!row) return null;
   return {
     resetWeek: String(row.reset_week),
     fetchedAt: String(row.fetched_at),
     items: JSON.parse(String(row.items_json)) as VendorItem[],
   };
+}
+
+export interface DeliveryState {
+  userId: string;
+  /** Cached DM channel id — reused forever so we stop calling Create DM. */
+  dmChannelId?: string;
+  /** Set when the user permanently cannot be DMed (blocked us, DMs closed). */
+  undeliverableReason?: string;
+  failureCount: number;
+  lastFailureAt?: string;
+}
+
+export async function getDeliveryState(
+  client: Client,
+  userId: string,
+): Promise<DeliveryState | null> {
+  const result = await client.execute({
+    sql: `SELECT user_id, dm_channel_id, undeliverable_reason, failure_count, last_failure_at
+          FROM delivery_state WHERE user_id = ?`,
+    args: [userId],
+  });
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    userId: String(row.user_id),
+    dmChannelId: row.dm_channel_id == null ? undefined : String(row.dm_channel_id),
+    undeliverableReason:
+      row.undeliverable_reason == null ? undefined : String(row.undeliverable_reason),
+    failureCount: Number(row.failure_count ?? 0),
+    lastFailureAt: row.last_failure_at == null ? undefined : String(row.last_failure_at),
+  };
+}
+
+/** Remember a user's DM channel id so later runs skip the Create DM call entirely. */
+export async function saveDmChannelId(
+  client: Client,
+  userId: string,
+  channelId: string,
+): Promise<void> {
+  await client.execute({
+    sql: `INSERT INTO delivery_state (user_id, dm_channel_id) VALUES (?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET
+            dm_channel_id = excluded.dm_channel_id,
+            updated_at = datetime('now')`,
+    args: [userId, channelId],
+  });
+}
+
+/** Record a permanent refusal so the fan-out stops attempting this user every week. */
+export async function markUndeliverable(
+  client: Client,
+  userId: string,
+  reason: string,
+  at: string = new Date().toISOString(),
+): Promise<void> {
+  await client.execute({
+    sql: `INSERT INTO delivery_state (user_id, undeliverable_reason, failure_count, last_failure_at)
+          VALUES (?, ?, 1, ?)
+          ON CONFLICT(user_id) DO UPDATE SET
+            undeliverable_reason = excluded.undeliverable_reason,
+            failure_count = delivery_state.failure_count + 1,
+            last_failure_at = excluded.last_failure_at,
+            updated_at = datetime('now')`,
+    args: [userId, reason, at],
+  });
+}
+
+/** Count a transient failure without marking the user off-limits. */
+export async function recordDeliveryFailure(
+  client: Client,
+  userId: string,
+  at: string = new Date().toISOString(),
+): Promise<void> {
+  await client.execute({
+    sql: `INSERT INTO delivery_state (user_id, failure_count, last_failure_at) VALUES (?, 1, ?)
+          ON CONFLICT(user_id) DO UPDATE SET
+            failure_count = delivery_state.failure_count + 1,
+            last_failure_at = excluded.last_failure_at,
+            updated_at = datetime('now')`,
+    args: [userId, at],
+  });
+}
+
+/** Clear failure state after a successful delivery. */
+export async function clearDeliveryFailures(client: Client, userId: string): Promise<void> {
+  await client.execute({
+    sql: `UPDATE delivery_state
+          SET failure_count = 0, undeliverable_reason = NULL, updated_at = datetime('now')
+          WHERE user_id = ?`,
+    args: [userId],
+  });
+}
+
+/** Read a source-bookkeeping value (see `source_meta`), or null if unset. */
+export async function getSourceMeta(client: Client, key: string): Promise<string | null> {
+  const result = await client.execute({
+    sql: `SELECT value FROM source_meta WHERE key = ?`,
+    args: [key],
+  });
+  const row = result.rows[0];
+  return row ? String(row.value) : null;
+}
+
+/** Write a source-bookkeeping value, replacing any previous one. */
+export async function setSourceMeta(client: Client, key: string, value: string): Promise<void> {
+  await client.execute({
+    sql: `INSERT INTO source_meta (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+    args: [key, value],
+  });
 }
 
 function rowToRule(row: Row): StoredRule {
