@@ -301,6 +301,21 @@ export async function clearDeliveryFailures(client: Client, userId: string): Pro
   });
 }
 
+/**
+ * Record a diagnostic line. Best-effort: a logging failure must never break the thing it is
+ * observing, so this swallows its own errors.
+ */
+export async function writeDebug(client: Client, kind: string, detail: string): Promise<void> {
+  try {
+    await client.execute({
+      sql: `INSERT INTO debug_log (kind, detail) VALUES (?, ?)`,
+      args: [kind.slice(0, 100), detail.slice(0, 2000)],
+    });
+  } catch {
+    // ignore
+  }
+}
+
 /** Read a source-bookkeeping value (see `source_meta`), or null if unset. */
 export async function getSourceMeta(client: Client, key: string): Promise<string | null> {
   const result = await client.execute({

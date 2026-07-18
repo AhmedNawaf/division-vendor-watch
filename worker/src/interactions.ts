@@ -37,9 +37,20 @@ const BUTTON_EDIT_WEAPONS = "wishlist:edit:weapons";
  * actually needs the database — PING must answer without touching Turso (and as fast as possible),
  * so its client is never constructed.
  */
+/**
+ * Schedules work to finish after the interaction has already been acknowledged.
+ *
+ * Discord allows 3 seconds. A round trip to Turso measures ~0.8–1.2s from the edge, and applying
+ * a submitted form needs three of them (read rules, read ~95KB of stock, write the batch), so the
+ * work simply does not fit. Deferring acknowledges immediately and edits the message when the
+ * work is done, which removes the deadline instead of racing it.
+ */
+export type Defer = (work: () => Promise<string>) => void;
+
 export async function handleInteraction(
   interaction: Interaction,
   getClient: () => Client,
+  defer?: Defer,
 ): Promise<InteractionResponse> {
   switch (interaction.type) {
     case InteractionType.PING:
@@ -49,6 +60,18 @@ export async function handleInteraction(
     case InteractionType.MESSAGE_COMPONENT:
       return handleComponent(interaction, getClient());
     case InteractionType.MODAL_SUBMIT:
+      if (defer) {
+        // Capture the client lazily so the deferred work opens its own connection.
+        defer(async () => {
+          const result = await handleModalSubmit(interaction, getClient());
+          return result.data?.content ?? "Saved.";
+        });
+        return {
+          type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+          data: { flags: MessageFlags.EPHEMERAL },
+        };
+      }
+      // Without a defer hook (tests, and as a fallback) do the work inline.
       return handleModalSubmit(interaction, getClient());
     default:
       return ephemeral("Unsupported interaction.");
@@ -61,14 +84,19 @@ async function handleCommand(
 ): Promise<InteractionResponse> {
   const userId = interactionUserId(interaction);
   if (!userId) return ephemeral("Could not identify your account.");
+
   if (interaction.data?.name !== "wishlist") return ephemeral("Unknown command.");
 
   const sub = interaction.data.options?.[0]?.name;
   switch (sub) {
     case "gear":
-      return buildGearModal(await bareRules(client, userId), await loadStock(client));
-    case "weapons":
-      return buildWeaponsModal(await bareRules(client, userId), await loadStock(client));
+    case "weapons": {
+      // Run both reads at once. Sequentially these are ~1.2s + ~1.5s, which alone consumed the
+      // 3-second budget and left Discord treating the interaction as expired — so the modal
+      // opened but submitting it failed.
+      const [rules, stock] = await Promise.all([bareRules(client, userId), loadStock(client)]);
+      return sub === "gear" ? buildGearModal(rules, stock.index) : buildWeaponsModal(rules, stock.index);
+    }
     case undefined:
     case "show":
       return renderOverview(await listRules(client, userId));
@@ -84,20 +112,42 @@ async function handleCommand(
  * come from the same items the matcher will evaluate — a separate summary could drift. Never
  * throws: a form with no stock labels is far better than a form that fails to open.
  */
-async function loadStock(client: Client): Promise<StockIndex> {
-  try {
-    const cached = await getLatestVendorCache(client);
-    return cached ? indexStock(cached.items) : EMPTY_STOCK;
-  } catch {
-    return EMPTY_STOCK;
-  }
+interface CachedStock {
+  index: StockIndex;
+  items: VendorItem[];
 }
 
-async function loadStockItems(client: Client): Promise<VendorItem[]> {
+const NO_STOCK: CachedStock = { index: EMPTY_STOCK, items: [] };
+
+/**
+ * Stock held in isolate memory between requests.
+ *
+ * Reading it costs ~1.5s — it is ~95KB and the database is far from the edge — while a modal must
+ * be returned inside Discord's 3-second limit and, unlike a message, cannot be deferred. Vendor
+ * stock only changes once a week, so re-reading it per interaction buys nothing. A cold isolate
+ * pays the cost once; everything after is free.
+ */
+let stockMemo: { at: number; value: CachedStock } | undefined;
+const STOCK_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Drop the memo. Isolate-level state persists between requests, which is the point in production
+ * but makes tests order-dependent — one case's stock would leak into the next.
+ */
+export function resetStockCache(): void {
+  stockMemo = undefined;
+}
+
+async function loadStock(client: Client): Promise<CachedStock> {
+  if (stockMemo && Date.now() - stockMemo.at < STOCK_TTL_MS) return stockMemo.value;
   try {
-    return (await getLatestVendorCache(client))?.items ?? [];
+    const cached = await getLatestVendorCache(client);
+    const value = cached ? { index: indexStock(cached.items), items: cached.items } : NO_STOCK;
+    stockMemo = { at: Date.now(), value };
+    return value;
   } catch {
-    return [];
+    // Never fail an interaction over decoration: a form without stock labels still works.
+    return stockMemo?.value ?? NO_STOCK;
   }
 }
 
@@ -108,14 +158,14 @@ async function handleComponent(
   const userId = interactionUserId(interaction);
   if (!userId) return ephemeral("Could not identify your account.");
 
-  switch (interaction.data?.custom_id) {
-    case BUTTON_EDIT_GEAR:
-      return buildGearModal(await bareRules(client, userId), await loadStock(client));
-    case BUTTON_EDIT_WEAPONS:
-      return buildWeaponsModal(await bareRules(client, userId), await loadStock(client));
-    default:
-      return updateEphemeral("That action is no longer available.");
+  const custom = interaction.data?.custom_id;
+  if (custom === BUTTON_EDIT_GEAR || custom === BUTTON_EDIT_WEAPONS) {
+    const [rules, stock] = await Promise.all([bareRules(client, userId), loadStock(client)]);
+    return custom === BUTTON_EDIT_GEAR
+      ? buildGearModal(rules, stock.index)
+      : buildWeaponsModal(rules, stock.index);
   }
+  return updateEphemeral("That action is no longer available.");
 }
 
 /**
@@ -144,12 +194,13 @@ async function handleModalSubmit(
   const existing = await listRules(client, userId);
   const stock = await loadStock(client);
   const inScope = existing.filter((rule) => ruleScope(stripId(rule)) === scope);
+  const outOfScope = existing.filter((rule) => ruleScope(stripId(rule)) !== scope);
 
   // A form may only remove what it could actually display. The weapons form shows a slice of 101
   // named weapons, so without this a submit would silently delete every watch it left out.
-  const shown = renderedValues(scope, inScope.map(stripId), stock);
+  const shown = renderedValues(scope, inScope.map(stripId), stock.index);
   const editable = inScope.filter((rule) => shown.has(ruleValue(stripId(rule))));
-  const withheld = inScope.length - editable.length;
+  const withheldRules = inScope.filter((rule) => !shown.has(ruleValue(stripId(rule))));
 
   const { added, removed } = diffRules(editable.map(stripId), desired);
 
@@ -162,9 +213,17 @@ async function handleModalSubmit(
     );
   }
 
-  const after = await listRules(client, userId);
-  const preview = previewMatches(await loadStockItems(client), after.map(stripId));
-  return ephemeral(summarize(scope, added, removed, rejected, after, preview, withheld));
+  // Derive the resulting wishlist locally rather than re-querying: we know exactly what was
+  // replaced, and a round trip here is one we cannot afford inside the 3-second budget.
+  const after: WatchRule[] = [
+    ...outOfScope.map(stripId),
+    ...withheldRules.map(stripId),
+    ...desired,
+  ];
+  const preview = previewMatches(stock.items, after);
+  return ephemeral(
+    summarize(scope, added, removed, rejected, after, preview, withheldRules.length),
+  );
 }
 
 /**
@@ -183,7 +242,7 @@ function summarize(
   added: WatchRule[],
   removed: WatchRule[],
   rejected: string[],
-  all: StoredRule[],
+  all: readonly WatchRule[],
   preview: string[],
   withheld: number,
 ): string {
@@ -242,7 +301,7 @@ function describeRule(rule: WatchRule): string {
   return parts.length > 0 ? parts.join(" ") : "any item";
 }
 
-function rulesText(rules: StoredRule[]): string {
+function rulesText(rules: readonly WatchRule[]): string {
   if (rules.length === 0) {
     return [
       "**Your wishlist is empty.**",
@@ -252,8 +311,8 @@ function rulesText(rules: StoredRule[]): string {
     ].join("\n");
   }
 
-  const gear = rules.filter((r) => ruleScope(stripId(r)) === "gear");
-  const weapons = rules.filter((r) => ruleScope(stripId(r)) === "weapons");
+  const gear = rules.filter((r) => ruleScope(r) === "gear");
+  const weapons = rules.filter((r) => ruleScope(r) === "weapons");
   const lines = [`**Your wishlist (${rules.length})**`];
 
   for (const [heading, group] of [
@@ -262,19 +321,20 @@ function rulesText(rules: StoredRule[]): string {
   ] as const) {
     if (group.length === 0) continue;
     lines.push("", heading);
-    // Keep well inside Discord's 2000-character message limit.
-    for (const rule of group.slice(0, 20)) lines.push(`• ${describeRule(stripId(rule))}`);
-    if (group.length > 20) lines.push(`…and ${group.length - 20} more`);
+    // Listing every rule can blow Discord's 2000-character limit, and an over-long body is
+    // rejected outright — which surfaces to the user as "this interaction failed".
+    for (const rule of group.slice(0, 12)) lines.push(`• ${describeRule(rule)}`);
+    if (group.length > 12) lines.push(`…and ${group.length - 12} more`);
   }
   return lines.join("\n");
 }
 
-function renderOverview(rules: StoredRule[]): InteractionResponse {
+function renderOverview(rules: readonly WatchRule[]): InteractionResponse {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
       flags: MessageFlags.EPHEMERAL,
-      content: rulesText(rules),
+      content: clamp(rulesText(rules)),
       components: [editButtons()],
     },
   };
@@ -300,16 +360,25 @@ function editButtons(): MessageComponent {
   };
 }
 
+/** Discord rejects a message over this, and rejection surfaces as "this interaction failed". */
+const MAX_CONTENT = 2000;
+
+function clamp(content: string): string {
+  if (content.length <= MAX_CONTENT) return content;
+  const notice = "\n…truncated";
+  return `${content.slice(0, MAX_CONTENT - notice.length)}${notice}`;
+}
+
 function ephemeral(content: string): InteractionResponse {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: { flags: MessageFlags.EPHEMERAL, content },
+    data: { flags: MessageFlags.EPHEMERAL, content: clamp(content) },
   };
 }
 
 function updateEphemeral(content: string): InteractionResponse {
   return {
     type: InteractionResponseType.UPDATE_MESSAGE,
-    data: { flags: MessageFlags.EPHEMERAL, content, components: [] },
+    data: { flags: MessageFlags.EPHEMERAL, content: clamp(content), components: [] },
   };
 }

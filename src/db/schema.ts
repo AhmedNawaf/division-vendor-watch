@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS delivery_state (
   updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Interaction diagnostics. Cloudflare's wrangler tail is live-only, so a failure that happens
+-- while nobody is watching leaves no trace; writing here instead means the record survives and
+-- can be read at any time. Written after the response is sent, so it costs no latency.
+CREATE TABLE IF NOT EXISTS debug_log (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  at     TEXT NOT NULL DEFAULT (datetime('now')),
+  kind   TEXT NOT NULL,
+  detail TEXT
+);
+
 -- Small key/value bag for source bookkeeping (e.g. per-payload Last-Modified stamps used
 -- for conditional requests). Kept separate from vendor_cache so it can be added to an
 -- existing database without a column migration.

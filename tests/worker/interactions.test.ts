@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { addRule, initSchema, listRules, saveVendorCache } from "../../src/db/store.js";
 import { parseVendorData } from "../../src/parser/parse-vendor-page.js";
 import { rawFromFixtures } from "../helpers.js";
-import { handleInteraction } from "../../worker/src/interactions.js";
+import { handleInteraction, resetStockCache } from "../../worker/src/interactions.js";
 import {
   ComponentType,
   InteractionResponseType,
@@ -70,6 +70,8 @@ describe("handleInteraction", () => {
   beforeEach(async () => {
     client = createClient({ url: ":memory:" });
     await initSchema(client);
+    // The Worker memoizes stock across requests; clear it so cases stay independent.
+    resetStockCache();
   });
 
   it("answers PING with PONG without touching the database", async () => {
@@ -239,6 +241,69 @@ describe("handleInteraction", () => {
     expect((await handleInteraction(button("wishlist:edit:weapons"), db)).data?.custom_id).toBe(
       WEAPONS_MODAL_ID,
     );
+  });
+
+  it("keeps every response inside Discord's 2000-character limit", async () => {
+    // Selecting everything is entirely reachable, and an over-long body is rejected outright —
+    // which the user sees as "this interaction failed" with no clue why.
+    const res = await handleInteraction(
+      submit(GEAR_MODAL_ID, {
+        geartype: ["gear", "gear-mod", "skill-mod", "named-gear"],
+        "gearset:0": [...GEAR_SETS].slice(0, 25),
+        "gearset:1": [...GEAR_SETS].slice(25),
+        "brand:0": [...BRANDS].slice(0, 25),
+        "brand:1": [...BRANDS].slice(25),
+      }),
+      db,
+    );
+
+    expect(await listRules(client, USER)).toHaveLength(GEAR_SETS.length + BRANDS.length + 4);
+    expect(res.data?.content!.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("keeps the overview inside the limit with a large wishlist", async () => {
+    for (const brand of BRANDS) await addRule(client, USER, { brand, label: brand });
+    const res = await handleInteraction(command("show"), db);
+    expect(res.data?.content!.length).toBeLessThanOrEqual(2000);
+  });
+
+  describe("deferred submits", () => {
+    it("acknowledges immediately and does the work afterwards", async () => {
+      let work: (() => Promise<string>) | undefined;
+      const res = await handleInteraction(
+        submit(GEAR_MODAL_ID, { geartype: ["gear"] }),
+        db,
+        (w) => {
+          work = w;
+        },
+      );
+
+      // Discord gets an ack straight away — no database round trips inside the 3s budget.
+      expect(res.type).toBe(InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE);
+      expect(await listRules(client, USER)).toHaveLength(0);
+
+      // ...and the real work runs after, producing the follow-up message.
+      expect(work).toBeDefined();
+      const content = await work!();
+      expect(content).toContain("Saved");
+      expect(await listRules(client, USER)).toHaveLength(1);
+    });
+
+    it("still applies the submit inline when no defer hook is supplied", async () => {
+      const res = await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["gear"] }), db);
+      expect(res.type).toBe(InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE);
+      expect(await listRules(client, USER)).toHaveLength(1);
+    });
+
+    it("only defers modal submits — commands must answer directly", async () => {
+      let deferred = false;
+      const res = await handleInteraction(command("gear"), db, () => {
+        deferred = true;
+      });
+      // A modal cannot be deferred: it has to be the immediate response.
+      expect(res.type).toBe(InteractionResponseType.MODAL);
+      expect(deferred).toBe(false);
+    });
   });
 
   it("degrades gracefully on an unknown component or form", async () => {
