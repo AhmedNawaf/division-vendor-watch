@@ -301,16 +301,33 @@ export async function clearDeliveryFailures(client: Client, userId: string): Pro
   });
 }
 
+/** Diagnostic rows retained. Enough to cover a debugging session, not enough to grow forever. */
+export const DEBUG_LOG_LIMIT = 200;
+
 /**
- * Record a diagnostic line. Best-effort: a logging failure must never break the thing it is
- * observing, so this swallows its own errors.
+ * Record a diagnostic line, trimming the log to its most recent {@link DEBUG_LOG_LIMIT} rows.
+ *
+ * Best-effort: a logging failure must never break the thing it is observing, so this swallows its
+ * own errors. Insert and prune go in one batch — the prune is worthless if it can be skipped, and
+ * this runs after the response is sent, so the extra statement costs no user-visible latency.
  */
 export async function writeDebug(client: Client, kind: string, detail: string): Promise<void> {
   try {
-    await client.execute({
-      sql: `INSERT INTO debug_log (kind, detail) VALUES (?, ?)`,
-      args: [kind.slice(0, 100), detail.slice(0, 2000)],
-    });
+    await client.batch(
+      [
+        {
+          sql: `INSERT INTO debug_log (kind, detail) VALUES (?, ?)`,
+          args: [kind.slice(0, 100), detail.slice(0, 2000)],
+        },
+        {
+          // Keep the newest N by id; AUTOINCREMENT makes id a reliable insertion order.
+          sql: `DELETE FROM debug_log
+                WHERE id <= (SELECT MAX(id) FROM debug_log) - ?`,
+          args: [DEBUG_LOG_LIMIT],
+        },
+      ],
+      "write",
+    );
   } catch {
     // ignore
   }

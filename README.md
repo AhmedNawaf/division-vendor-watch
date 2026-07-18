@@ -50,21 +50,17 @@ worse than alerting nothing:
 2. On `304` — this reset week's cached stock. It is still evaluated, because watchlists change
    independently of the stock: a rule added yesterday must still match today.
 3. On failure — the same cached copy, flagged degraded (alerts say so in their header).
-4. On failure with no usable cache — the community mirror
-   ([`mxswat/mx-division-builds`](https://github.com/mxswat/mx-division-builds), which syncs
-   from the same upstream), but **only** for files GitHub confirms were committed after this
-   week's reset.
+4. On failure with no usable cache — the run fails rather than alerting on anything older.
 
 The cache is always scoped to the current reset week; a previous week's stock is never served.
 
-Two deliberate refusals are worth knowing about. A **shape change** (loader script gone,
-non-array JSON) never triggers the mirror — the mirror carries a copy of the same upstream data,
-so it would likely be broken identically and the fallback would only bury the breakage. And the
-mirror's **freshness gate is strict**: at the time of writing its sync runs *before* the Tuesday
-reset and its `mods.json` has not been updated since **February 2021**, so in practice every
-mirror payload is currently rejected. That is the gate working, not failing — it is why stale
-stock never reaches a DM. Treat the mirror as insurance that may pay out later, and the cache
-as the fallback that actually carries the weight.
+A **community mirror was tried and removed.**
+[`mxswat/mx-division-builds`](https://github.com/mxswat/mx-division-builds) syncs the same three
+JSON files, so it looks like an obvious fallback — but its sync runs at ~03:30 UTC on Tuesday,
+*before* the 08:30 reset, so its copy always predates the current week, and its `mods.json` has
+not been updated since **February 2021**. A freshness gate keyed on the GitHub commit date
+correctly rejected 100% of its payloads. It was working code that could never fire, so the cache
+is the only fallback, and it is the one that was carrying the weight anyway.
 
 ### Reset date & time
 

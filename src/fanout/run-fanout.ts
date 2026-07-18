@@ -42,8 +42,6 @@ export interface FanoutConfig {
   dryRun: boolean;
   resetTimeZone?: string;
   showReasons?: boolean;
-  /** Allow the community-mirror fallback when the primary source is unreachable. Default true. */
-  useMirror?: boolean;
   /** Sustained Discord request rate. Default 5/s, far below Discord's 50/s ceiling. */
   requestsPerSecond?: number;
   /** Gap between users, spreading the batch out. Default 1000ms. */
@@ -81,7 +79,7 @@ export interface FanoutResult {
   /** Create DM calls made. Should fall to 0 in steady state as channel ids get cached. */
   channelsOpened: number;
   dryRun: boolean;
-  /** True when the stock came from the cache or the mirror rather than a fresh primary fetch. */
+  /** True when the stock came from the cache rather than a fresh fetch. */
   degraded: boolean;
 }
 
@@ -125,8 +123,6 @@ function parseStoredLastModified(stored: string | null): Partial<Record<PayloadT
  *  2. On 304 — our cached copy for *this* reset week. We still evaluate it, because watchlists
  *     change independently of the stock: a user who added a rule yesterday must still be matched.
  *  3. On failure — the same cached copy, flagged as degraded.
- *  4. On failure with no usable cache — the mirror, but only for payloads provably newer than
- *     this week's reset (gated inside fetchVendorData).
  *
  * Cache reads are scoped to `weeklyReset.date` throughout. Serving a *previous* week's stock
  * would generate alerts for items nobody can buy any more, which is worse than alerting nothing.
@@ -139,15 +135,12 @@ async function resolveStock(
   log: Logger,
 ): Promise<ResolvedStock> {
   const sourceLogger = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };
-  const mirrorOptions =
-    config.useMirror === false ? {} : { mirror: {}, mirrorFresherThan: weeklyReset.instant };
 
   const baseOptions = {
     vendorUrl: config.vendorUrl,
     timeoutMs: config.requestTimeoutMs,
     fetchImpl: deps.fetchImpl,
     logger: sourceLogger,
-    ...mirrorOptions,
   };
 
   const stored = parseStoredLastModified(await getSourceMeta(client, LAST_MODIFIED_KEY));
@@ -182,19 +175,7 @@ async function resolveStock(
   }
 
   const reset = parseVendorData(raw);
-  const sourceNotice =
-    raw.origin === "mirror"
-      ? "Primary source unavailable — partial data from a community mirror" +
-        (raw.missing?.length ? ` (missing ${raw.missing.join(", ")})` : "") +
-        "."
-      : undefined;
-
-  return {
-    items: reset.items,
-    fresh: true,
-    sourceNotice,
-    lastModified: raw.origin === "primary" ? collectLastModified(raw) : undefined,
-  };
+  return { items: reset.items, fresh: true, lastModified: collectLastModified(raw) };
 }
 
 /**

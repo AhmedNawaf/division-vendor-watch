@@ -1,9 +1,6 @@
 import { VendorSourceError } from "../errors.js";
-import { mirrorFileUpdatedAt, mirrorUrl, type MirrorOptions } from "./mirror.js";
 
 export type PayloadType = "gear" | "weapons" | "mods";
-
-export type SourceOrigin = "primary" | "mirror";
 
 export interface RawVendorPayload {
   type: PayloadType;
@@ -22,15 +19,11 @@ export interface RawVendorData {
   resetDate?: string;
   fetchedAt: string;
   payloads: RawVendorPayload[];
-  /** Which source served this data. */
-  origin: SourceOrigin;
   /**
    * True when every payload answered 304 Not Modified, so `payloads` is empty. The caller
    * should serve items from its own cache rather than treating this as "no stock".
    */
   notModified?: boolean;
-  /** Payload types that could not be served (e.g. a mirror file too stale to trust). */
-  missing?: PayloadType[];
 }
 
 export interface SourceLogger {
@@ -49,13 +42,6 @@ export interface VendorSourceOptions {
    * unchanged the source answers 304 and we skip the transfer entirely.
    */
   ifModifiedSince?: Partial<Record<PayloadType, string>>;
-  /** Community-mirror fallback when the primary source fails. Off unless provided. */
-  mirror?: MirrorOptions;
-  /**
-   * Reject mirror payloads last updated before this instant — pass the current reset instant.
-   * Required for the mirror to be used at all; without it we cannot prove freshness.
-   */
-  mirrorFresherThan?: Date;
   logger?: SourceLogger;
 }
 
@@ -88,7 +74,7 @@ interface FetchTextResult {
 }
 
 interface ExpectOptions {
-  /** Skipped when undefined — the GitHub raw mirror serves JSON as text/plain. */
+  /** Skipped when undefined. */
   contentTypeIncludes?: string;
   minBytes: number;
   ifModifiedSince?: string;
@@ -217,21 +203,6 @@ function parseJsonArray(text: string, url: string): unknown[] {
   return data;
 }
 
-/**
- * Whether an error means "the source changed shape" rather than "the source was unreachable".
- * Shape changes must never trigger the mirror fallback: the mirror carries a copy of the same
- * upstream data, so it would likely be broken identically, and swapping sources would bury the
- * breakage we need to see.
- */
-function isStructuralError(err: unknown): boolean {
-  return (
-    err instanceof VendorSourceError &&
-    typeof err.context === "object" &&
-    err.context !== null &&
-    (err.context as Record<string, unknown>).structural === true
-  );
-}
-
 /** Fetch the three JSON payloads from the primary source, honouring conditional requests. */
 async function fetchPrimaryPayloads(
   urls: Record<PayloadType, string>,
@@ -275,57 +246,6 @@ async function fetchPrimaryPayloads(
   return { payloads, notModified: false };
 }
 
-/**
- * Fetch from the community mirror, keeping only payloads provably newer than `fresherThan`.
- * Returns the payloads it could vouch for plus the types it had to drop.
- */
-async function fetchMirrorPayloads(
-  resolved: ResolvedOptions,
-  mirror: MirrorOptions,
-  fresherThan: Date,
-  log: SourceLogger,
-): Promise<{ payloads: RawVendorPayload[]; missing: PayloadType[] }> {
-  const payloads: RawVendorPayload[] = [];
-  const missing: PayloadType[] = [];
-
-  for (const type of PAYLOAD_TYPES) {
-    const url = mirrorUrl(type, mirror);
-    const updatedAt = await mirrorFileUpdatedAt(
-      type,
-      resolved.fetchImpl,
-      resolved.userAgent,
-      undefined,
-      mirror,
-    );
-
-    if (!updatedAt || updatedAt.getTime() < fresherThan.getTime()) {
-      log.warn(
-        `Mirror ${type}.json rejected as stale (last updated ` +
-          `${updatedAt ? updatedAt.toISOString() : "unknown"}, need >= ${fresherThan.toISOString()})`,
-      );
-      missing.push(type);
-      continue;
-    }
-
-    try {
-      // GitHub raw serves JSON as text/plain, so content-type is not checked here.
-      const result = await fetchText(url, resolved, { minBytes: MIN_JSON_BYTES });
-      payloads.push({
-        type,
-        url,
-        records: parseJsonArray(result.text, url),
-        // Deliberately no lastModified: mirror stamps must never seed conditional
-        // requests against the primary source.
-      });
-    } catch (err) {
-      log.warn(`Mirror ${type}.json fetch failed: ${err instanceof Error ? err.message : err}`);
-      missing.push(type);
-    }
-  }
-
-  return { payloads, missing };
-}
-
 /** Fetches the vendor index page, discovers the JSON endpoints, and fetches them. */
 export async function fetchVendorData(options: VendorSourceOptions): Promise<RawVendorData> {
   const resolved: ResolvedOptions = {
@@ -336,66 +256,24 @@ export async function fetchVendorData(options: VendorSourceOptions): Promise<Raw
   const log = options.logger ?? noopLogger;
   const fetchedAt = new Date().toISOString();
 
-  try {
-    const page = await fetchText(options.vendorUrl, resolved, {
-      contentTypeIncludes: "text/html",
-      minBytes: MIN_HTML_BYTES,
-    });
-    const { urls, resetDate } = discoverPayloadUrls(page.text, page.url);
-    const { payloads, notModified } = await fetchPrimaryPayloads(
-      urls,
-      resolved,
-      options.ifModifiedSince ?? {},
-    );
+  const page = await fetchText(options.vendorUrl, resolved, {
+    contentTypeIncludes: "text/html",
+    minBytes: MIN_HTML_BYTES,
+  });
+  const { urls, resetDate } = discoverPayloadUrls(page.text, page.url);
+  const { payloads, notModified } = await fetchPrimaryPayloads(
+    urls,
+    resolved,
+    options.ifModifiedSince ?? {},
+  );
 
-    if (notModified) log.info("Vendor source unchanged since last run (HTTP 304).");
+  if (notModified) log.info("Vendor source unchanged since last run (HTTP 304).");
 
-    return {
-      sourceUrl: options.vendorUrl,
-      resetDate,
-      fetchedAt,
-      payloads,
-      origin: "primary",
-      ...(notModified ? { notModified: true } : {}),
-    };
-  } catch (primaryError) {
-    // The mirror exists for availability, not for correctness: fall back only on transport
-    // failures, never on a shape change (see isStructuralError).
-    if (isStructuralError(primaryError)) throw primaryError;
-    if (!options.mirror || !options.mirrorFresherThan) throw primaryError;
-
-    log.warn(
-      `Primary vendor source failed (${
-        primaryError instanceof Error ? primaryError.message : String(primaryError)
-      }); trying the community mirror.`,
-    );
-
-    const { payloads, missing } = await fetchMirrorPayloads(
-      resolved,
-      options.mirror,
-      options.mirrorFresherThan,
-      log,
-    );
-
-    if (payloads.length === 0) {
-      throw new VendorSourceError(
-        "Primary vendor source failed and no mirror payload was fresh enough to trust",
-        { missing },
-        { cause: primaryError },
-      );
-    }
-
-    log.warn(
-      `Serving DEGRADED data from the mirror: ${payloads.map((p) => p.type).join(", ")}` +
-        (missing.length > 0 ? ` (missing ${missing.join(", ")})` : ""),
-    );
-
-    return {
-      sourceUrl: options.vendorUrl,
-      fetchedAt,
-      payloads,
-      origin: "mirror",
-      ...(missing.length > 0 ? { missing } : {}),
-    };
-  }
+  return {
+    sourceUrl: options.vendorUrl,
+    resetDate,
+    fetchedAt,
+    payloads,
+    ...(notModified ? { notModified: true } : {}),
+  };
 }

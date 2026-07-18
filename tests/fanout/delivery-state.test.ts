@@ -15,7 +15,6 @@ function baseConfig(overrides: Partial<FanoutConfig> = {}): FanoutConfig {
     botToken: "test-token",
     databaseUrl: ":memory:",
     dryRun: false,
-    useMirror: false,
     perUserDelayMs: 0,
     ...overrides,
   };
