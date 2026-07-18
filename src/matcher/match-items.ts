@@ -1,5 +1,6 @@
 import type { WatchRule, Watchlist } from "../config/load-watchlist.js";
 import type { VendorAttribute, VendorItem } from "../types/vendor.js";
+import { nameMatches, normalizeKey } from "./normalize.js";
 
 export interface RuleMatch {
   rule: WatchRule;
@@ -13,15 +14,6 @@ export interface ItemMatch {
   reasons: string[];
 }
 
-/** Lowercase, strip punctuation, collapse whitespace — for tolerant equality checks. */
-function normalizeKey(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[’'.]/g, "")
-    .replace(/[,/#!$%^&*;:{}=\-_`~()]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 function attributePool(item: VendorItem): VendorAttribute[] {
   return item.coreAttribute ? [item.coreAttribute, ...item.attributes] : item.attributes;
@@ -46,12 +38,12 @@ export function evaluateRule(item: VendorItem, rule: WatchRule): string[] | null
   }
 
   if (rule.brand !== undefined) {
-    if (!item.brand || normalizeKey(item.brand) !== normalizeKey(rule.brand)) return null;
+    if (!item.brand || !nameMatches(item.brand, rule.brand)) return null;
     reasons.push(`Brand is ${item.brand}`);
   }
 
   if (rule.gearSet !== undefined) {
-    if (!item.gearSet || normalizeKey(item.gearSet) !== normalizeKey(rule.gearSet)) return null;
+    if (!item.gearSet || !nameMatches(item.gearSet, rule.gearSet)) return null;
     reasons.push(`Gear set is ${item.gearSet}`);
   }
 

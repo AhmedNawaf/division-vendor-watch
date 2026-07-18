@@ -1,0 +1,53 @@
+name: Sync Item Catalog
+
+on:
+  workflow_dispatch:
+  # The catalog is append-only and season-locked — roughly one new brand and one new gear set
+  # per season, ~4 seasons a year. Monthly is comfortably ahead of that.
+  schedule:
+    - cron: "0 5 1 * *" # 05:00 UTC on the 1st of each month
+
+# Allow the run to commit the regenerated catalog back to the repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-catalog
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync catalog
+        run: npm run sync:catalog
+
+      # The sync refuses to write a suspiciously small catalog, but run the suite too — the
+      # catalog tests assert the snapshot is plausible and that no weapon bucket has grown
+      # past Discord's 25-option select cap, which would silently break the picker menus.
+      - name: Test
+        run: npm test
+
+      - name: Commit if the catalog changed
+        run: |
+          if git diff --quiet -- src/catalog/catalog-data.ts; then
+            echo "Catalog unchanged."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/catalog/catalog-data.ts
+            git commit -m "chore: sync item catalog [skip ci]"
+            git push
+          fi
