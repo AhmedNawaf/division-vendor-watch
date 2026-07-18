@@ -1,6 +1,9 @@
 import type { Client } from "@libsql/client";
-import { listRules, replaceRules, type StoredRule } from "../../src/db/store.js";
+import { getLatestVendorCache, listRules, replaceRules, type StoredRule } from "../../src/db/store.js";
 import type { WatchRule } from "../../src/config/watchlist-schema.js";
+import { matchItems } from "../../src/matcher/match-items.js";
+import type { VendorItem } from "../../src/types/vendor.js";
+import { EMPTY_STOCK, indexStock, type StockIndex } from "./stock.js";
 import {
   ButtonStyle,
   collectModalValues,
@@ -61,14 +64,38 @@ async function handleCommand(
   const sub = interaction.data.options?.[0]?.name;
   switch (sub) {
     case "gear":
-      return buildGearModal(await bareRules(client, userId));
+      return buildGearModal(await bareRules(client, userId), await loadStock(client));
     case "weapons":
-      return buildWeaponsModal(await bareRules(client, userId));
+      return buildWeaponsModal(await bareRules(client, userId), await loadStock(client));
     case undefined:
     case "show":
       return renderOverview(await listRules(client, userId));
     default:
       return ephemeral("Unknown subcommand.");
+  }
+}
+
+/**
+ * This week's stock, used to label options with what is actually available.
+ *
+ * Read straight from the cache rather than a precomputed summary so the counts shown in the form
+ * come from the same items the matcher will evaluate — a separate summary could drift. Never
+ * throws: a form with no stock labels is far better than a form that fails to open.
+ */
+async function loadStock(client: Client): Promise<StockIndex> {
+  try {
+    const cached = await getLatestVendorCache(client);
+    return cached ? indexStock(cached.items) : EMPTY_STOCK;
+  } catch {
+    return EMPTY_STOCK;
+  }
+}
+
+async function loadStockItems(client: Client): Promise<VendorItem[]> {
+  try {
+    return (await getLatestVendorCache(client))?.items ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -81,9 +108,9 @@ async function handleComponent(
 
   switch (interaction.data?.custom_id) {
     case BUTTON_EDIT_GEAR:
-      return buildGearModal(await bareRules(client, userId));
+      return buildGearModal(await bareRules(client, userId), await loadStock(client));
     case BUTTON_EDIT_WEAPONS:
-      return buildWeaponsModal(await bareRules(client, userId));
+      return buildWeaponsModal(await bareRules(client, userId), await loadStock(client));
     default:
       return updateEphemeral("That action is no longer available.");
   }
@@ -126,7 +153,19 @@ async function handleModalSubmit(
   }
 
   const after = await listRules(client, userId);
-  return ephemeral(summarize(scope, added, removed, rejected, after));
+  const preview = previewMatches(await loadStockItems(client), after.map(stripId));
+  return ephemeral(summarize(scope, added, removed, rejected, after, preview));
+}
+
+/**
+ * What the user's rules would alert on right now, using the real matcher so the preview cannot
+ * disagree with what actually gets delivered on Tuesday.
+ */
+function previewMatches(items: VendorItem[], rules: WatchRule[]): string[] {
+  if (items.length === 0 || rules.length === 0) return [];
+  return matchItems(items, { rules: rules as [WatchRule, ...WatchRule[]] }).map(
+    (m) => `${m.item.name} — ${m.item.vendor}`,
+  );
 }
 
 function summarize(
@@ -135,6 +174,7 @@ function summarize(
   removed: WatchRule[],
   rejected: string[],
   all: StoredRule[],
+  preview: string[],
 ): string {
   const lines: string[] = [];
   if (added.length === 0 && removed.length === 0) {
@@ -148,6 +188,19 @@ function summarize(
   if (rejected.length > 0) {
     lines.push(`⚠️ Ignored ${rejected.length} unrecognised value(s): ${rejected.slice(0, 5).join(", ")}`);
   }
+
+  // Immediate feedback beats a bare receipt: it shows the rules actually work, and catches a
+  // watchlist that matches nothing (or far too much) before the user waits a week to find out.
+  if (all.length > 0) {
+    if (preview.length === 0) {
+      lines.push("", "Nothing in stock matches right now — you'll be DMed when something does.");
+    } else {
+      lines.push("", `**${preview.length} in stock right now:**`);
+      for (const line of preview.slice(0, 8)) lines.push(`• ${line}`);
+      if (preview.length > 8) lines.push(`…and ${preview.length - 8} more`);
+    }
+  }
+
   lines.push("", rulesText(all));
   return lines.join("\n");
 }

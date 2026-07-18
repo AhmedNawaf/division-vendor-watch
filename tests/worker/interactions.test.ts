@@ -1,6 +1,8 @@
 import { createClient, type Client } from "@libsql/client";
 import { beforeEach, describe, expect, it } from "vitest";
-import { addRule, initSchema, listRules } from "../../src/db/store.js";
+import { addRule, initSchema, listRules, saveVendorCache } from "../../src/db/store.js";
+import { parseVendorData } from "../../src/parser/parse-vendor-page.js";
+import { rawFromFixtures } from "../helpers.js";
 import { handleInteraction } from "../../worker/src/interactions.js";
 import {
   ComponentType,
@@ -116,7 +118,7 @@ describe("handleInteraction", () => {
   it("stores the rules a submitted gear form represents", async () => {
     const res = await handleInteraction(
       submit(GEAR_MODAL_ID, {
-        categories: ["gear"],
+        geartype: ["gear"],
         "gearset:0": [GEAR_SETS[0]!],
         "brand:0": [BRANDS[0]!],
       }),
@@ -155,8 +157,8 @@ describe("handleInteraction", () => {
   });
 
   it("leaves the other form's rules alone — editing gear must not wipe weapons", async () => {
-    await handleInteraction(submit(WEAPONS_MODAL_ID, { quick: ["named-weapons"] }), db);
-    await handleInteraction(submit(GEAR_MODAL_ID, { categories: ["gear"] }), db);
+    await handleInteraction(submit(WEAPONS_MODAL_ID, { weapontype: ["named-weapons"] }), db);
+    await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["gear"] }), db);
 
     const rules = await listRules(client, USER);
     expect(rules.some((r) => r.namedOnly === true)).toBe(true);
@@ -164,7 +166,7 @@ describe("handleInteraction", () => {
   });
 
   it("submitting an empty form clears that scope and reports it", async () => {
-    await handleInteraction(submit(GEAR_MODAL_ID, { categories: ["gear"] }), db);
+    await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["gear"] }), db);
     const res = await handleInteraction(submit(GEAR_MODAL_ID, {}), db);
 
     expect(res.data?.content).toContain("removed 1");
@@ -172,8 +174,8 @@ describe("handleInteraction", () => {
   });
 
   it("says nothing changed when a form is submitted untouched", async () => {
-    await handleInteraction(submit(GEAR_MODAL_ID, { categories: ["gear"] }), db);
-    const res = await handleInteraction(submit(GEAR_MODAL_ID, { categories: ["gear"] }), db);
+    await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["gear"] }), db);
+    const res = await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["gear"] }), db);
 
     expect(res.data?.content).toContain("No changes");
     expect(await listRules(client, USER)).toHaveLength(1);
@@ -181,7 +183,7 @@ describe("handleInteraction", () => {
 
   it("ignores values that are not in the catalog instead of storing dead rules", async () => {
     const res = await handleInteraction(
-      submit(GEAR_MODAL_ID, { "brand:0": ["Totally Made Up Brand"], categories: ["gear"] }),
+      submit(GEAR_MODAL_ID, { "brand:0": ["Totally Made Up Brand"], geartype: ["gear"] }),
       db,
     );
 
@@ -192,7 +194,7 @@ describe("handleInteraction", () => {
   });
 
   it("expands the 'any exotic' quick pick into per-weapon rules", async () => {
-    const res = await handleInteraction(submit(WEAPONS_MODAL_ID, { quick: ["exotic-weapons"] }), db);
+    const res = await handleInteraction(submit(WEAPONS_MODAL_ID, { weapontype: ["exotic-weapons"] }), db);
     expect(res.data?.content).toContain("Saved");
     const rules = await listRules(client, USER);
     expect(rules.length).toBeGreaterThan(20);
@@ -200,7 +202,7 @@ describe("handleInteraction", () => {
   });
 
   it("scopes edits to the invoking user", async () => {
-    await handleInteraction(submit(GEAR_MODAL_ID, { categories: ["gear"] }, "other-user"), db);
+    await handleInteraction(submit(GEAR_MODAL_ID, { geartype: ["gear"] }, "other-user"), db);
     await handleInteraction(submit(GEAR_MODAL_ID, {}), db); // USER clears their (empty) scope
 
     expect(await listRules(client, "other-user")).toHaveLength(1);
@@ -224,4 +226,88 @@ describe("handleInteraction", () => {
       "no longer available",
     );
   });
+
+  describe("form separation", () => {
+    const valuesIn = async (sub: string, client: () => Client): Promise<string[]> => {
+      const res = await handleInteraction(command(sub), client);
+      return selects(res.data?.components).flatMap((s) =>
+        ((s.options as Array<{ value: string }>) ?? []).map((o) => o.value),
+      );
+    };
+
+    it("keeps weapons out of the gear form", async () => {
+      // The gear form previously offered "All weapons", which made no sense in a form about gear.
+      const values = await valuesIn("gear", db);
+      expect(values).not.toContain("weapon");
+      expect(values).not.toContain("named-weapons");
+      expect(values).not.toContain("exotic-weapons");
+    });
+
+    it("keeps gear out of the weapons form", async () => {
+      const values = await valuesIn("weapons", db);
+      expect(values).not.toContain("gear");
+      expect(values).not.toContain("gear-mod");
+      expect(values).not.toContain("skill-mod");
+    });
+
+    it("routes an 'all weapons' rule to the weapons form's scope", async () => {
+      await handleInteraction(submit(WEAPONS_MODAL_ID, { weapontype: ["weapon"] }), db);
+      // Editing gear must not disturb it, even though it is a category rule.
+      await handleInteraction(submit(GEAR_MODAL_ID, {}), db);
+      const rules = await listRules(client, USER);
+      expect(rules).toHaveLength(1);
+      expect(rules[0]!.category).toBe("weapon");
+    });
+  });
+
+  describe("with this week's stock cached", () => {
+    beforeEach(async () => {
+      const { items } = parseVendorData(rawFromFixtures());
+      await saveVendorCache(client, "2026-07-14", items);
+    });
+
+    it("leads with what is in stock and says how much", async () => {
+      const res = await handleInteraction(command("gear"), db);
+      const labels = (res.data?.components ?? []).map((c) => (c as { label?: string }).label ?? "");
+
+      expect(labels[0]).toContain("in stock now");
+      expect(labels[1]).toContain("not in stock");
+    });
+
+    it("labels options with where they can be bought", async () => {
+      const res = await handleInteraction(command("gear"), db);
+      const described = selects(res.data?.components)
+        .flatMap((s) => (s.options as Array<{ description?: string }>) ?? [])
+        .filter((o) => o.description?.includes("in stock"));
+
+      expect(described.length).toBeGreaterThan(0);
+      expect(described[0]!.description).toMatch(/\d+ in stock — /);
+    });
+
+    it("previews what a saved wishlist matches right now", async () => {
+      const res = await handleInteraction(
+        submit(WEAPONS_MODAL_ID, { weapontype: ["named-weapons"] }),
+        db,
+      );
+      // Feedback beats a bare receipt — it proves the rule works before the user waits a week.
+      expect(res.data?.content).toMatch(/\d+ in stock right now/);
+    });
+
+    it("says so plainly when a saved wishlist matches nothing yet", async () => {
+      const res = await handleInteraction(
+        submit(GEAR_MODAL_ID, { "gearset:1": [notInStockGearSet()] }),
+        db,
+      );
+      expect(res.data?.content).toContain("Nothing in stock matches right now");
+    });
+  });
 });
+
+/** A gear set the fixture week does not stock, for the empty-preview case. */
+function notInStockGearSet(): string {
+  const { items } = parseVendorData(rawFromFixtures());
+  const stocked = new Set(items.map((i) => i.gearSet).filter(Boolean));
+  const absent = GEAR_SETS.find((g) => !stocked.has(g));
+  if (!absent) throw new Error("fixture stocks every gear set; pick another fixture");
+  return absent;
+}

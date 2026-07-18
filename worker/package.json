@@ -8,8 +8,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "register": "tsx scripts/register-commands.ts",
-    "local": "tsx scripts/local-sign.ts"
+    "register": "node --env-file-if-exists=.dev.vars --import tsx scripts/register-commands.ts",
+    "local": "node --env-file-if-exists=.dev.vars --import tsx scripts/local-sign.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4"
