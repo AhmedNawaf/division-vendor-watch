@@ -12,6 +12,7 @@ import {
   markUndeliverable,
   recordAlerts,
   recordDeliveryFailure,
+  recordFanoutHealth,
   saveDmChannelId,
   saveVendorCache,
   setSourceMeta,
@@ -305,7 +306,7 @@ export async function runFanout(config: FanoutConfig, deps: FanoutDeps = {}): Pr
     }
   }
 
-  return {
+  const result: FanoutResult = {
     totalItems: stock.items.length,
     subscribers: subscriberIds.length,
     usersAlerted,
@@ -316,4 +317,19 @@ export async function runFanout(config: FanoutConfig, deps: FanoutDeps = {}): Pr
     dryRun: config.dryRun,
     degraded: stock.sourceNotice !== undefined,
   };
+
+  // Leave a heartbeat so a run that never happens is distinguishable from a quiet vendor week.
+  // Dry runs are excluded: they must not make a broken schedule look healthy.
+  if (!config.dryRun) {
+    await recordFanoutHealth(client, {
+      at: new Date().toISOString(),
+      ok: true,
+      items: result.totalItems,
+      subscribers: result.subscribers,
+      alerted: result.usersAlerted,
+      failed: result.usersFailed,
+    });
+  }
+
+  return result;
 }

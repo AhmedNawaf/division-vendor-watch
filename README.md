@@ -62,6 +62,27 @@ not been updated since **February 2021**. A freshness gate keyed on the GitHub c
 correctly rejected 100% of its payloads. It was working code that could never fire, so the cache
 is the only fallback, and it is the one that was carrying the weight anyway.
 
+### Knowing it still works
+
+A weekly job that stops is invisible: no message on Tuesday looks exactly like a Tuesday where
+nothing matched. So each fan-out records its outcome to `source_meta` under `fanout:lastRun`, and
+`/wishlist show` reports it:
+
+```
+✅ Last checked 2h ago — 144 items, 1 subscriber(s).
+⚠️ Last successful check was 12 days ago — the weekly run may have stopped.
+⚠️ The last vendor check (3h ago) failed: Network error fetching vendor page
+```
+
+Because the check is "when did a run last succeed", it catches every cause at once — a crash, a
+missing secret, an expired token, or GitHub disabling the schedule after 60 days of repository
+inactivity. Dry runs deliberately do **not** write a heartbeat: a preview must never make a broken
+schedule look healthy.
+
+The one case this cannot cover is the database itself being unreachable, since that is where the
+heartbeat lives. For that, the workflow's own red run is the signal — GitHub emails you when a
+scheduled workflow fails, provided notifications are enabled for the repository.
+
 ### Reset date & time
 
 The page's JSON cache-buster (e.g. `?20260717`) is the site's *last-updated* date, not the

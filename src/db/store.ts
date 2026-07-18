@@ -333,6 +333,48 @@ export async function writeDebug(client: Client, kind: string, detail: string): 
   }
 }
 
+/** source_meta key holding the outcome of the most recent fan-out attempt. */
+export const FANOUT_HEALTH_KEY = "fanout:lastRun";
+
+/**
+ * The outcome of the last fan-out.
+ *
+ * A weekly job that fails silently is indistinguishable from a week where nothing matched — you
+ * only find out by noticing you have not been messaged in a while, which is exactly the kind of
+ * thing nobody notices. Recording each attempt turns that silence into something checkable.
+ */
+export interface FanoutHealth {
+  /** ISO timestamp of the attempt. */
+  at: string;
+  ok: boolean;
+  items?: number;
+  subscribers?: number;
+  alerted?: number;
+  failed?: number;
+  /** Present when ok is false. */
+  error?: string;
+}
+
+export async function recordFanoutHealth(client: Client, health: FanoutHealth): Promise<void> {
+  // Best-effort: a bookkeeping failure must not fail an otherwise good run.
+  try {
+    await setSourceMeta(client, FANOUT_HEALTH_KEY, JSON.stringify(health));
+  } catch {
+    // ignore
+  }
+}
+
+export async function getFanoutHealth(client: Client): Promise<FanoutHealth | null> {
+  try {
+    const raw = await getSourceMeta(client, FANOUT_HEALTH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as FanoutHealth;
+    return typeof parsed?.at === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Read a source-bookkeeping value (see `source_meta`), or null if unset. */
 export async function getSourceMeta(client: Client, key: string): Promise<string | null> {
   const result = await client.execute({

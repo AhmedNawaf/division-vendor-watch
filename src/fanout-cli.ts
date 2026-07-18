@@ -1,3 +1,5 @@
+import { createNodeClient } from "./db/node-client.js";
+import { recordFanoutHealth } from "./db/store.js";
 import { ConfigError, isAppError } from "./errors.js";
 import { runFanout, type FanoutConfig } from "./fanout/run-fanout.js";
 import type { Logger } from "./run.js";
@@ -60,6 +62,26 @@ async function main(): Promise<void> {
   if (result.usersFailed > 0) process.exitCode = 1;
 }
 
+/**
+ * Record a failed attempt so the bot can say "the last check failed" rather than showing a
+ * stale-but-confident wishlist. Best-effort by nature: if the database is what broke, this
+ * cannot work, and the workflow's own red run is the signal of last resort.
+ */
+async function recordFailure(err: unknown): Promise<void> {
+  const url = process.env.TURSO_DATABASE_URL;
+  if (!url) return;
+  try {
+    const client = createNodeClient(url, process.env.TURSO_AUTH_TOKEN || undefined);
+    await recordFanoutHealth(client, {
+      at: new Date().toISOString(),
+      ok: false,
+      error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+    });
+  } catch {
+    // ignore
+  }
+}
+
 main().catch((err: unknown) => {
   if (isAppError(err)) {
     logger.error(`[${err.code}] ${err.message}`);
@@ -70,4 +92,5 @@ main().catch((err: unknown) => {
     logger.error(`Unexpected error: ${String(err)}`);
   }
   process.exitCode = 1;
+  void recordFailure(err);
 });

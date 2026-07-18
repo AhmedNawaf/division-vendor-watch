@@ -1,5 +1,12 @@
 import type { Client } from "@libsql/client";
-import { getLatestVendorCache, listRules, replaceRules, type StoredRule } from "../../src/db/store.js";
+import {
+  getFanoutHealth,
+  getLatestVendorCache,
+  listRules,
+  replaceRules,
+  type FanoutHealth,
+  type StoredRule,
+} from "../../src/db/store.js";
 import type { WatchRule } from "../../src/config/watchlist-schema.js";
 import { matchItems } from "../../src/matcher/match-items.js";
 import type { VendorItem } from "../../src/types/vendor.js";
@@ -98,8 +105,15 @@ async function handleCommand(
       return sub === "gear" ? buildGearModal(rules, stock.index) : buildWeaponsModal(rules, stock.index);
     }
     case undefined:
-    case "show":
-      return renderOverview(await listRules(client, userId));
+    case "show": {
+      // Concurrently, like the modal path: sequential reads to a distant database are what
+      // previously overran Discord's 3-second budget.
+      const [rules, health] = await Promise.all([
+        listRules(client, userId),
+        getFanoutHealth(client).catch(() => null),
+      ]);
+      return renderOverview(rules, health);
+    }
     default:
       return ephemeral("Unknown subcommand.");
   }
@@ -329,12 +343,42 @@ function rulesText(rules: readonly WatchRule[]): string {
   return lines.join("\n");
 }
 
-function renderOverview(rules: readonly WatchRule[]): InteractionResponse {
+/** Beyond this, a weekly job has plainly missed a run rather than merely being between them. */
+const STALE_AFTER_DAYS = 8;
+
+/**
+ * A line describing when the watcher last ran.
+ *
+ * This is the whole point of recording health: without it, a broken schedule and a week where
+ * nothing matched look identical from the user's side — no message either way. Surfacing it here
+ * means the failure shows up where someone is already looking, rather than needing to be noticed.
+ */
+function healthLine(health: FanoutHealth | null): string {
+  if (!health) return "🕐 No vendor check has run yet.";
+
+  const ageMs = Date.now() - new Date(health.at).getTime();
+  const days = Math.floor(ageMs / 86_400_000);
+  const hours = Math.floor(ageMs / 3_600_000);
+  const ago = days >= 1 ? `${days} day${days === 1 ? "" : "s"} ago` : `${hours}h ago`;
+
+  if (!health.ok) {
+    return `⚠️ The last vendor check (${ago}) failed${health.error ? `: ${health.error}` : "."}`;
+  }
+  if (ageMs > STALE_AFTER_DAYS * 86_400_000) {
+    return `⚠️ Last successful check was ${ago} — the weekly run may have stopped.`;
+  }
+  return `✅ Last checked ${ago} — ${health.items ?? 0} items, ${health.subscribers ?? 0} subscriber(s).`;
+}
+
+function renderOverview(
+  rules: readonly WatchRule[],
+  health: FanoutHealth | null = null,
+): InteractionResponse {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
       flags: MessageFlags.EPHEMERAL,
-      content: clamp(rulesText(rules)),
+      content: clamp(`${rulesText(rules)}\n\n${healthLine(health)}`),
       components: [editButtons()],
     },
   };
