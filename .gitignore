@@ -16,3 +16,8 @@ data/alert-history.json
 # Live fixtures captured during inspection (regenerate with `npm run inspect`)
 testdata/_live-*.html
 testdata/_live-*.json
+
+# Cloudflare Worker local state and secrets
+.wrangler/
+worker/.dev.vars
+worker/.local-keys.json

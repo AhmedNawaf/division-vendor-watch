@@ -176,6 +176,59 @@ attributes, and talent. Fingerprints are stored in `ALERT_HISTORY_PATH` and are 
 written **after** a successful Discord delivery — so a failed send won't suppress a retry.
 A new weekly reset produces new fingerprints, so genuinely new stock always alerts.
 
+## Multi-user Discord bot (in progress)
+
+Alongside the single-user webhook flow above, the repo is growing a **multi-user bot** so
+anyone can install it, pick a wishlist from menus (no typing), and get their own alerts. The
+shared matching/formatting logic lives in [`src/core`](src/core) and is reused by both paths.
+
+**Architecture (all on free tiers):**
+
+- **Cloudflare Worker** ([`worker/`](worker)) — the Discord *HTTP interactions* endpoint. It
+  verifies the Ed25519 request signature, routes `/wishlist` slash commands and menu clicks,
+  and stores each user's rules. No always-on server.
+- **Turso / libSQL** — the database. The same query layer in [`src/db/store.ts`](src/db/store.ts)
+  runs under the Worker (`@libsql/client/web`) and Node (`@libsql/client`) via an injected client.
+- **GitHub Actions** (weekly, planned) — the fan-out that fetches vendor stock once, matches it
+  against every subscriber's rules, and DMs alerts. It uses the Node runtime (no Worker CPU cap).
+
+### Provision the pieces
+
+1. **Discord application** — at <https://discord.com/developers/applications>, create an app.
+   Note the **Application ID** and **Public Key** (General Information), and a **Bot token**
+   (Bot tab). Under **Installation**, enable **User Install**.
+2. **Turso database** — create a database and grab its `libsql://…` URL and an auth token
+   (`turso db create`, `turso db show`, `turso db tokens create`). Apply the schema once with
+   the SQL in [`src/db/schema.ts`](src/db/schema.ts) (`turso db shell <db> < schema.sql`, or call
+   `initSchema(client)` from a Node script).
+3. **Register the slash commands** — from `worker/`:
+   ```bash
+   npm install
+   DISCORD_APP_ID=… DISCORD_BOT_TOKEN=… npm run register
+   ```
+
+### Configure & deploy the Worker
+
+Secrets are set with Wrangler, never committed:
+
+```bash
+cd worker
+npx wrangler secret put DISCORD_PUBLIC_KEY
+npx wrangler secret put DISCORD_APP_ID
+npx wrangler secret put DISCORD_BOT_TOKEN
+npx wrangler secret put TURSO_DATABASE_URL
+npx wrangler secret put TURSO_AUTH_TOKEN
+npm run deploy
+```
+
+Then set the deployed URL as the app's **Interactions Endpoint URL** in the Discord portal —
+Discord sends a signed PING that the Worker must answer (it does). Once saved, `/wishlist add`,
+`/wishlist list`, and `/wishlist remove` work in DMs.
+
+> Going **public** (listed, installable by strangers) adds obligations: a Privacy Policy and
+> Terms of Service, verification at 100 installs, and DM-rate-limit hygiene. The current slice
+> targets you and friends first; treat public distribution as a later, deliberate step.
+
 ## Troubleshooting
 
 - **`[VENDOR_SOURCE] …` / `[PARSER] …`** — the source page or its data endpoints changed

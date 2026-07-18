@@ -1,12 +1,12 @@
 import { loadWatchlist } from "./config/load-watchlist.js";
+import { evaluateWatch } from "./core/evaluate.js";
 import { formatAlerts } from "./discord/format-alert.js";
 import { sendDiscordMessages } from "./discord/send-webhook.js";
 import { ConfigError } from "./errors.js";
-import { matchItems, type ItemMatch } from "./matcher/match-items.js";
 import { parseVendorData } from "./parser/parse-vendor-page.js";
 import { fetchVendorData } from "./source/vendor-source.js";
-import { computeWeeklyReset, formatReset, DEFAULT_RESET_TIMEZONE } from "./source/reset-schedule.js";
-import { AlertHistory, computeFingerprint } from "./storage/alert-history.js";
+import { computeWeeklyReset } from "./source/reset-schedule.js";
+import { AlertHistory } from "./storage/alert-history.js";
 
 export interface RuntimeConfig {
   vendorUrl: string;
@@ -65,25 +65,23 @@ export async function runVendorWatch(
   );
 
   const weeklyReset = computeWeeklyReset((deps.now ?? (() => new Date()))());
-  const resetStamp = formatReset(
-    weeklyReset.nextInstant,
-    config.resetTimeZone ?? DEFAULT_RESET_TIMEZONE,
-  );
-  log.info(`Next weekly reset: ${resetStamp}`);
 
   const watchlist = await loadWatchlist(config.watchlistPath);
-  const matches = matchItems(reset.items, watchlist);
-  log.info(`${matches.length} item(s) matched the watchlist`);
-
   const history = await AlertHistory.load(config.alertHistoryPath);
-  const newMatches: { match: ItemMatch; fingerprint: string }[] = [];
-  for (const match of matches) {
-    const fingerprint = computeFingerprint(match.item, weeklyReset.date);
-    if (!history.has(fingerprint)) newMatches.push({ match, fingerprint });
-  }
-  log.info(`${newMatches.length} new match(es) not yet alerted`);
 
-  const formatOpts = { resetDate: resetStamp, showReasons: config.showReasons ?? true };
+  const evaluation = evaluateWatch({
+    items: reset.items,
+    watchlist,
+    weeklyReset,
+    isAlreadyAlerted: (fingerprint) => history.has(fingerprint),
+    resetTimeZone: config.resetTimeZone,
+    showReasons: config.showReasons,
+  });
+  const { matches, newAlerts, messages } = evaluation;
+
+  log.info(`Next weekly reset: ${evaluation.resetStamp}`);
+  log.info(`${matches.length} item(s) matched the watchlist`);
+  log.info(`${newAlerts.length} new match(es) not yet alerted`);
 
   if (config.dryRun) {
     // Preview every current match regardless of history — dedup only matters for real sends.
@@ -92,20 +90,24 @@ export async function runVendorWatch(
     } else {
       log.info(
         `DRY_RUN enabled — previewing all ${matches.length} current match(es) ` +
-          `(${newMatches.length} not yet alerted; nothing sent or written):`,
+          `(${newAlerts.length} not yet alerted; nothing sent or written):`,
       );
-      for (const message of formatAlerts(matches, formatOpts)) log.info(`\n${message}`);
+      const previews = formatAlerts(matches, {
+        resetDate: evaluation.resetStamp,
+        showReasons: config.showReasons ?? true,
+      });
+      for (const message of previews) log.info(`\n${message}`);
     }
     return {
       totalItems: reset.items.length,
       totalMatches: matches.length,
-      newMatches: newMatches.length,
+      newMatches: newAlerts.length,
       messagesSent: 0,
       dryRun: true,
     };
   }
 
-  if (newMatches.length === 0) {
+  if (newAlerts.length === 0) {
     return {
       totalItems: reset.items.length,
       totalMatches: matches.length,
@@ -114,8 +116,6 @@ export async function runVendorWatch(
       dryRun: config.dryRun,
     };
   }
-
-  const messages = formatAlerts(newMatches.map((m) => m.match), formatOpts);
 
   if (!config.webhookUrl) {
     throw new ConfigError(
@@ -133,14 +133,14 @@ export async function runVendorWatch(
 
   // Only persist fingerprints after a fully successful delivery.
   const sentAt = new Date().toISOString();
-  for (const { fingerprint } of newMatches) history.add(fingerprint, sentAt);
+  for (const { fingerprint } of newAlerts) history.add(fingerprint, sentAt);
   await history.save();
-  log.info(`Recorded ${newMatches.length} fingerprint(s) to history`);
+  log.info(`Recorded ${newAlerts.length} fingerprint(s) to history`);
 
   return {
     totalItems: reset.items.length,
     totalMatches: matches.length,
-    newMatches: newMatches.length,
+    newMatches: newAlerts.length,
     messagesSent: messages.length,
     dryRun: false,
   };

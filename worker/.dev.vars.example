@@ -1,0 +1,7 @@
+# Copy to `worker/.dev.vars` for `wrangler dev`. Never commit the real file.
+# In production these are set with `wrangler secret put <NAME>` instead.
+DISCORD_PUBLIC_KEY=""
+DISCORD_APP_ID=""
+DISCORD_BOT_TOKEN=""
+TURSO_DATABASE_URL=""
+TURSO_AUTH_TOKEN=""

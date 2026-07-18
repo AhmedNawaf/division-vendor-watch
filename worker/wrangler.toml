@@ -1,0 +1,13 @@
+name = "division-vendor-watch"
+main = "src/index.ts"
+compatibility_date = "2025-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Public config only. Secrets are set with `wrangler secret put <NAME>`:
+#   DISCORD_PUBLIC_KEY   – Ed25519 public key, used to verify interaction signatures
+#   DISCORD_APP_ID       – application (client) id, for command registration
+#   DISCORD_BOT_TOKEN    – bot token, for command registration
+#   TURSO_DATABASE_URL   – libsql://<db>.turso.io
+#   TURSO_AUTH_TOKEN     – Turso database auth token
+[vars]
+# (none yet — everything sensitive lives in secrets)
