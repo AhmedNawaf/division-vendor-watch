@@ -1,5 +1,6 @@
 import type { ItemMatch } from "../matcher/match-items.js";
 import type { VendorItem } from "../types/vendor.js";
+import { vendorLine } from "./vendor-locations.js";
 
 /** Discord hard limit for a single message's content field. */
 export const DISCORD_MAX_MESSAGE_LENGTH = 2000;
@@ -9,8 +10,6 @@ export interface FormatOptions {
   resetDate?: string;
   /** Override the per-message length budget (mainly for tests). */
   maxMessageLength?: number;
-  /** Include the "Reason:" section explaining why each item matched. Defaults to true. */
-  showReasons?: boolean;
   /** Credit line for the upstream data source. Pass `false` to omit. */
   sourceCredit?: string | false;
   /** Warning shown when the stock came from a degraded/incomplete source. */
@@ -47,34 +46,32 @@ function itemMarker(item: VendorItem): string {
   return "▫️";
 }
 
-/** Render one matched item into a self-contained text block. */
-export function formatItemBlock(match: ItemMatch, showReasons = true): string {
+/**
+ * Render one matched item as three dense lines: what it is, where to buy it, what it rolls.
+ *
+ * The earlier layout gave every attribute its own line under its own heading, so a single item
+ * ran to a dozen lines and a normal week's alert became a wall of text you had to scroll rather
+ * than scan. Discord also caps a message at 2000 characters, so verbosity directly costs items
+ * per message.
+ */
+export function formatItemBlock(match: ItemMatch): string {
   const { item } = match;
-  const lines: string[] = [];
-  lines.push(`${itemMarker(item)} ${item.name}`);
-  lines.push(`Vendor: ${item.vendor}`);
 
-  if (item.gearSet) lines.push(`Set: ${item.gearSet}`);
-  else if (item.brand) lines.push(`Brand: ${item.brand}`);
+  // What it is: name, then the qualifiers that identify it at a glance.
+  const identity = [`${itemMarker(item)} **${item.name}**`];
+  if (item.slot) identity.push(item.slot);
+  if (item.gearSet) identity.push(item.gearSet);
+  else if (item.brand) identity.push(item.brand);
 
-  if (item.coreAttribute) {
-    lines.push("", "Core:", item.coreAttribute.rawValue);
-  }
+  // What it rolls: core first (it is the defining stat), then attributes, then the talent.
+  const stats = [
+    ...(item.coreAttribute ? [item.coreAttribute.rawValue] : []),
+    ...item.attributes.map((attr) => attr.rawValue),
+    ...(item.talent ? [item.talent] : []),
+  ];
 
-  if (item.attributes.length > 0) {
-    lines.push("", "Attributes:");
-    for (const attr of item.attributes) lines.push(attr.rawValue);
-  }
-
-  if (item.talent) {
-    lines.push("", `Talent: ${item.talent}`);
-  }
-
-  if (showReasons && match.reasons.length > 0) {
-    lines.push("", "Reason:");
-    for (const reason of match.reasons) lines.push(`- ${reason}`);
-  }
-
+  const lines = [identity.join(" · "), vendorLine(item.vendor)];
+  if (stats.length > 0) lines.push(stats.join(" · "));
   return lines.join("\n");
 }
 
@@ -113,8 +110,7 @@ export function formatAlerts(matches: ItemMatch[], options: FormatOptions = {}):
   );
   const contHeader = `${title} (continued)`;
 
-  const showReasons = options.showReasons ?? true;
-  const blocks = matches.map((match) => formatItemBlock(match, showReasons));
+  const blocks = matches.map((match) => formatItemBlock(match));
   const messages: string[] = [];
   let currentHeader = header;
   let current = currentHeader;

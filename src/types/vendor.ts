@@ -23,6 +23,8 @@ export interface VendorItem {
   vendor: string;
   name: string;
   category: ItemCategory;
+  /** Armour slot for gear — Mask, Chest, Backpack, Gloves, Holster, Kneepads. */
+  slot?: string;
   brand?: string;
   gearSet?: string;
   talent?: string;

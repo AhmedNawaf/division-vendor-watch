@@ -16,11 +16,6 @@ function parseBoolean(value: string | undefined): boolean {
   return value !== undefined && ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
-function parseBooleanDefaultTrue(value: string | undefined): boolean {
-  if (value === undefined || value.trim() === "") return true;
-  return !["0", "false", "no", "off"].includes(value.toLowerCase());
-}
-
 function readConfig(): FanoutConfig {
   const timeoutRaw = process.env.REQUEST_TIMEOUT_MS;
   const timeout = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : 15_000;
@@ -44,7 +39,6 @@ function readConfig(): FanoutConfig {
     databaseUrl,
     databaseAuthToken: process.env.TURSO_AUTH_TOKEN || undefined,
     dryRun,
-    showReasons: parseBooleanDefaultTrue(process.env.SHOW_REASONS),
     resetTimeZone: process.env.RESET_TIMEZONE || "Asia/Riyadh",
   };
 }

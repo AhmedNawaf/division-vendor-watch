@@ -14,11 +14,6 @@ function parseBoolean(value: string | undefined): boolean {
 }
 
 /** Parse a boolean env var that defaults to true when unset or empty. */
-function parseBooleanDefaultTrue(value: string | undefined): boolean {
-  if (value === undefined || value.trim() === "") return true;
-  return !["0", "false", "no", "off"].includes(value.toLowerCase());
-}
-
 function readConfig(): RuntimeConfig {
   const timeoutRaw = process.env.REQUEST_TIMEOUT_MS;
   const timeout = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : 15_000;
@@ -30,7 +25,6 @@ function readConfig(): RuntimeConfig {
     requestTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 15_000,
     dryRun: parseBoolean(process.env.DRY_RUN),
     webhookUrl: process.env.DISCORD_WEBHOOK_URL || undefined,
-    showReasons: parseBooleanDefaultTrue(process.env.SHOW_REASONS),
     resetTimeZone: process.env.RESET_TIMEZONE || "Asia/Riyadh",
   };
 }

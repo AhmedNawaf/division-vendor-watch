@@ -27,7 +27,6 @@ export interface EvaluateOptions {
    */
   isAlreadyAlerted: (fingerprint: string) => boolean;
   resetTimeZone?: string;
-  showReasons?: boolean;
   /** Warning surfaced in the alert header when the stock came from a degraded source. */
   sourceNotice?: string;
 }
@@ -66,7 +65,6 @@ export function evaluateWatch(options: EvaluateOptions): EvaluateResult {
     newAlerts.map((alert) => alert.match),
     {
       resetDate: resetStamp,
-      showReasons: options.showReasons ?? true,
       sourceNotice: options.sourceNotice,
     },
   );

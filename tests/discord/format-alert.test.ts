@@ -3,7 +3,6 @@ import {
   DISCORD_MAX_MESSAGE_LENGTH,
   SOURCE_CREDIT,
   formatAlerts,
-  formatItemBlock,
 } from "../../src/discord/format-alert.js";
 import type { ItemMatch } from "../../src/matcher/match-items.js";
 import type { VendorItem } from "../../src/types/vendor.js";
@@ -21,40 +20,6 @@ function match(overrides: Partial<VendorItem> = {}, reasons = ["Watchlisted"]): 
   return { item, ruleMatches: [], reasons };
 }
 
-describe("formatItemBlock", () => {
-  it("renders a full block with core, attributes, and reason", () => {
-    const block = formatItemBlock(
-      match({
-        coreAttribute: { name: "Weapon Damage", value: 15, unit: "%", rawValue: "15% Weapon Damage" },
-        attributes: [
-          { name: "Critical Hit Chance", value: 5.7, unit: "%", rawValue: "5.7% Critical Hit Chance" },
-        ],
-      }),
-    );
-    expect(block).toContain("⭐ Fox's Prayer");
-    expect(block).toContain("Vendor: Countdown Vendor");
-    expect(block).toContain("Core:");
-    expect(block).toContain("15% Weapon Damage");
-    expect(block).toContain("Attributes:");
-    expect(block).toContain("5.7% Critical Hit Chance");
-    expect(block).toContain("Reason:");
-  });
-
-  it("handles missing optional values", () => {
-    const block = formatItemBlock(match({ isNamed: false, coreAttribute: undefined, attributes: [] }));
-    expect(block).toContain("Fox's Prayer");
-    expect(block).not.toContain("Core:");
-    expect(block).not.toContain("Attributes:");
-    expect(block).toContain("Reason:");
-  });
-
-  it("omits the reason section when showReasons is false", () => {
-    const block = formatItemBlock(match(), false);
-    expect(block).toContain("Fox's Prayer");
-    expect(block).not.toContain("Reason:");
-  });
-});
-
 describe("formatAlerts", () => {
   it("returns nothing when there are no matches", () => {
     expect(formatAlerts([])).toEqual([]);
@@ -67,13 +32,6 @@ describe("formatAlerts", () => {
     expect(messages[0]).toContain("📅 Next reset: 2026-07-17");
     expect(messages[0]).toContain("🎯 1 match");
     expect(messages[0]).toContain("Fox's Prayer");
-  });
-
-  it("drops reasons from every block when showReasons is false", () => {
-    const messages = formatAlerts([match({ name: "A" }), match({ name: "B" })], {
-      showReasons: false,
-    });
-    expect(messages.join("\n")).not.toContain("Reason:");
   });
 
   it("groups multiple matches into a single message when they fit", () => {

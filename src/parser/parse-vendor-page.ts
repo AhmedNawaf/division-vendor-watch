@@ -168,6 +168,7 @@ function normalizeGear(record: Record<string, unknown>): VendorItem {
     vendor: requireString(record, "vendor", "gear"),
     name: requireString(record, "name", "gear"),
     category: "gear",
+    slot: optionalString(record, "slot"),
     brand: isGearSet ? undefined : brandField,
     gearSet: isGearSet ? brandField : undefined,
     talent: optionalString(record, "talents"),
@@ -219,7 +220,7 @@ const NORMALIZERS: Record<PayloadType, (record: Record<string, unknown>) => Vend
  * matches, i.e. a watcher that quietly stops alerting.
  */
 const EXPECTED_FIELDS: Record<PayloadType, string[]> = {
-  gear: ["vendor", "name", "rarity", "brand", "core", "attributes", "talents"],
+  gear: ["vendor", "name", "rarity", "brand", "slot", "core", "attributes", "talents"],
   weapons: ["vendor", "name", "rarity", "talent", "attribute1", "attribute2", "attribute3"],
   mods: ["vendor", "name", "rarity", "attributes"],
 };

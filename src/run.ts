@@ -15,8 +15,6 @@ export interface RuntimeConfig {
   requestTimeoutMs: number;
   dryRun: boolean;
   webhookUrl?: string;
-  /** Include the per-item "Reason:" section in alerts. Defaults to true. */
-  showReasons?: boolean;
   /** IANA time zone used to display the reset stamp. Defaults to Asia/Riyadh. */
   resetTimeZone?: string;
 }
@@ -75,7 +73,6 @@ export async function runVendorWatch(
     weeklyReset,
     isAlreadyAlerted: (fingerprint) => history.has(fingerprint),
     resetTimeZone: config.resetTimeZone,
-    showReasons: config.showReasons,
   });
   const { matches, newAlerts, messages } = evaluation;
 
@@ -94,7 +91,6 @@ export async function runVendorWatch(
       );
       const previews = formatAlerts(matches, {
         resetDate: evaluation.resetStamp,
-        showReasons: config.showReasons ?? true,
       });
       for (const message of previews) log.info(`\n${message}`);
     }

@@ -42,7 +42,6 @@ export interface FanoutConfig {
   /** Preview only: evaluate and log per user, but send nothing and write nothing. */
   dryRun: boolean;
   resetTimeZone?: string;
-  showReasons?: boolean;
   /** Sustained Discord request rate. Default 5/s, far below Discord's 50/s ceiling. */
   requestsPerSecond?: number;
   /** Gap between users, spreading the batch out. Default 1000ms. */
@@ -252,7 +251,6 @@ export async function runFanout(config: FanoutConfig, deps: FanoutDeps = {}): Pr
       weeklyReset,
       isAlreadyAlerted: (fingerprint) => alerted.has(fingerprint),
       resetTimeZone: config.resetTimeZone,
-      showReasons: config.showReasons,
       sourceNotice: stock.sourceNotice,
     });
 
